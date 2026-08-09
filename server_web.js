@@ -81,7 +81,7 @@ const PAYOUT_CONFIG = {
 };
 
 // ============================================================
-// EXPRESS & SERVIDOR DE ARCHIVOS ESTÁTICOS (FRONTEND)
+// EXPRESS & SERVIDOR DE ARCHIVOS ESTÁTICOS
 // ============================================================
 
 app.disable('x-powered-by');
@@ -89,7 +89,7 @@ app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '20kb' }));
 
-// Servir archivos estáticos del Frontend (index.html, juegos.html, CSS, JS, etc.)
+// Servir archivos estáticos del Frontend
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ============================================================
@@ -352,7 +352,7 @@ const verifyAdmin = (req, res, next) => {
 };
 
 // ============================================================
-// HEALTH CHECK
+// HEALTH CHECK & RAÍZ
 // ============================================================
 
 app.get('/health', async (req, res) => {
@@ -362,6 +362,20 @@ app.get('/health', async (req, res) => {
     } catch (error) {
         return res.status(503).json({ success: false, status: 'error', database: 'unavailable' });
     }
+});
+
+// Ruta principal para evitar error "Not Found" en la raíz del servidor
+app.get('/', (req, res) => {
+    const fs = require('fs');
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
+    }
+    return res.status(200).json({
+        success: true,
+        message: "API Backend de GanaRecompensasEnLaWeb activa y funcionando 🚀",
+        version: "1.0.0"
+    });
 });
 
 // ============================================================
@@ -471,7 +485,7 @@ app.get('/api/monetag-postback', async (req, res) => {
 });
 
 // ============================================================
-// AUTH (REGISTER / LOGIN)
+// AUTH (REGISTER / LOGIN / FORGOT PASSWORD)
 // ============================================================
 
 app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
@@ -570,6 +584,31 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
         return res.json({ success: true, user, token });
     } catch (error) {
         return res.status(500).json({ success: false, error: 'Error al iniciar sesión.' });
+    }
+});
+
+app.post('/api/v1/auth/forgot-password', authRateLimit, async (req, res) => {
+    const { email } = req.body || {};
+    if (typeof email !== 'string' || !isValidEmail(email)) {
+        return res.status(400).json({ success: false, error: 'Correo electrónico no válido.' });
+    }
+    return res.json({
+        success: true,
+        message: 'Si el correo electrónico se encuentra registrado, recibirás las instrucciones para restablecer tu contraseña.'
+    });
+});
+
+app.get('/api/v1/user/profile', verifyToken, async (req, res) => {
+    try {
+        const userRes = await db.query(
+            `SELECT id, email, country_code, tier_level, points_balance, referral_code, total_referrals
+             FROM web_users WHERE id = $1 LIMIT 1`,
+            [req.user.userId]
+        );
+        if (userRes.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuario no encontrado.' });
+        return res.json({ success: true, user: userRes.rows[0] });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: 'Error del servidor.' });
     }
 });
 
@@ -951,13 +990,14 @@ app.post('/api/v1/game/claim', verifyToken, rewardRateLimit, async (req, res) =>
 });
 
 // ============================================================
-// RETIRAR (WITHDRAWALS)
+// RETIRAR (WITHDRAWALS) Y ALIAS
 // ============================================================
 
-app.post('/api/v1/user/withdraw', verifyToken, withdrawRateLimit, async (req, res) => {
-    const { amount, method, destination } = req.body || {};
+const processWithdrawal = async (req, res) => {
+    const { amount, method, destination, details } = req.body || {};
     const userId = req.user.userId;
 
+    const payoutDestination = destination || details;
     const parsedAmount = normalizeMoney(amount);
     const normalizedMethod = normalizePayoutMethod(method);
 
@@ -969,7 +1009,7 @@ app.post('/api/v1/user/withdraw', verifyToken, withdrawRateLimit, async (req, re
         return res.status(400).json({ success: false, error: 'Método de pago no soportado.' });
     }
 
-    if (typeof destination !== 'string' || destination.trim().length === 0 || destination.length > 255) {
+    if (typeof payoutDestination !== 'string' || payoutDestination.trim().length === 0 || payoutDestination.length > 255) {
         return res.status(400).json({ success: false, error: 'Destino de retiro inválido.' });
     }
 
@@ -1008,7 +1048,7 @@ app.post('/api/v1/user/withdraw', verifyToken, withdrawRateLimit, async (req, re
             `INSERT INTO web_withdrawals (user_id, amount_usd, fee_usd, net_amount_usd, points_deducted, payout_method, payout_destination, status)
              VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
              RETURNING id, status, created_at`,
-            [userId, parsedAmount, fee, netAmount, requiredPoints, normalizedMethod, destination.trim()]
+            [userId, parsedAmount, fee, netAmount, requiredPoints, normalizedMethod, payoutDestination.trim()]
         );
 
         await client.query('COMMIT');
@@ -1025,7 +1065,10 @@ app.post('/api/v1/user/withdraw', verifyToken, withdrawRateLimit, async (req, re
     } finally {
         client.release();
     }
-});
+};
+
+app.post('/api/v1/user/withdraw', verifyToken, withdrawRateLimit, processWithdrawal);
+app.post('/api/v1/withdraw/request', verifyToken, withdrawRateLimit, processWithdrawal);
 
 // ============================================================
 // ADMIN ENDPOINTS
@@ -1090,26 +1133,29 @@ app.patch('/api/v1/admin/withdrawals/:id', verifyAdmin, async (req, res) => {
 });
 
 // ============================================================
-// MAPEO DE COMPATIBILIDAD CON HERENCIA / FRONTEND EXISTENTE
+// MAPEO DE COMPATIBILIDAD Y REDIRECCIONES DE RUTAS API
 // ============================================================
 
-// Redirección directa para rutas del frontend que hacen llamadas a /api/ads o /api/game sin versión
+app.use('/api/v1/ad/start', (req, res, next) => { req.url = '/api/v1/web-video/start'; app.handle(req, res, next); });
+app.use('/api/v1/ad/claim', (req, res, next) => { req.url = '/api/v1/web-video/claim'; app.handle(req, res, next); });
 app.use('/api/ads/watch', (req, res, next) => { req.url = '/api/v1/web-video/start'; app.handle(req, res, next); });
 app.use('/api/ads/claim', (req, res, next) => { req.url = '/api/v1/web-video/claim'; app.handle(req, res, next); });
 app.use('/api/game/start', (req, res, next) => { req.url = '/api/v1/game/start'; app.handle(req, res, next); });
 app.use('/api/game/claim', (req, res, next) => { req.url = '/api/v1/game/claim'; app.handle(req, res, next); });
 
-// Servir la vista principal para peticiones raíz
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// Manejo genérico de rutas no encontradas en API
+app.use('/api/*', (req, res) => {
+    res.status(404).json({ success: false, error: 'Ruta de API no encontrada.' });
 });
 
-// Capture-all para manejar SPA / navegación directa a páginas .html sin extensión
+// Capture-all para manejar SPA / navegación directa a páginas HTML
 app.get('*', (req, res) => {
-    if (req.path.startsWith('/api')) {
-        return res.status(404).json({ success: false, error: 'Ruta de API no encontrada.' });
+    const fs = require('fs');
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
     }
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    res.status(404).json({ success: false, error: 'Página no encontrada.' });
 });
 
 // ============================================================
