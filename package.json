@@ -1,9 +1,13 @@
 {
   "name": "ganarecompensasenlaweb-backend",
   "version": "1.0.0",
+  "private": true,
   "main": "server_web.js",
   "scripts": {
     "start": "node server_web.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
