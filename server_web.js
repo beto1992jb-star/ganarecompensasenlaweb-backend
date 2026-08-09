@@ -6,11 +6,12 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const path = require('path');
 
 const app = express();
 
 // ============================================================
-// CONFIGURACIÓN
+// CONFIGURACIÓN DE PUERTO Y VARIABLES
 // ============================================================
 
 const PORT = Number(process.env.PORT) || 10000;
@@ -80,13 +81,16 @@ const PAYOUT_CONFIG = {
 };
 
 // ============================================================
-// EXPRESS
+// EXPRESS & SERVIDOR DE ARCHIVOS ESTÁTICOS (FRONTEND)
 // ============================================================
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
 app.use(express.json({ limit: '20kb' }));
+
+// Servir archivos estáticos del Frontend (index.html, juegos.html, CSS, JS, etc.)
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ============================================================
 // HEADERS DE SEGURIDAD
@@ -242,13 +246,11 @@ function safeRollback(client) {
     return client.query('ROLLBACK').catch(() => {});
 }
 
-// Lock de Recompensa
 async function lockRewardOperation(client, userId, rewardType) {
     const key = `${String(userId)}:${String(rewardType)}`;
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
 }
 
-// Uso Diario
 async function getDailyUsage(client, userId) {
     const result = await client.query(
         `SELECT video_count, game_count FROM reward_daily_usage WHERE user_id = $1 AND reward_date = CURRENT_DATE`,
@@ -258,7 +260,6 @@ async function getDailyUsage(client, userId) {
     return result.rows[0];
 }
 
-// Evento de Recompensa
 async function insertRewardEvent(client, { userId, sourceType, transId, points }) {
     const result = await client.query(
         `INSERT INTO web_reward_events (user_id, source_type, trans_id, points_awarded)
@@ -354,7 +355,6 @@ const verifyAdmin = (req, res, next) => {
 // HEALTH CHECK
 // ============================================================
 
-app.get('/', async (req, res) => res.status(200).json({ success: true, message: 'Servidor activo', status: 'ok' }));
 app.get('/health', async (req, res) => {
     try {
         await db.query('SELECT 1');
@@ -584,7 +584,7 @@ app.get('/api/v1/user/balance', verifyToken, async (req, res) => {
 });
 
 // ============================================================
-// MONETAG VIDEO ENDPOINTS (STATUS, START, CLAIM)
+// MONETAG VIDEO ENDPOINTS
 // ============================================================
 
 app.get('/api/v1/web-video/status', verifyToken, async (req, res) => {
@@ -735,7 +735,6 @@ app.post('/api/v1/web-video/claim', verifyToken, rewardRateLimit, async (req, re
             return res.status(409).json({ success: false, error: 'Esta recompensa ya fue utilizada.' });
         }
 
-        // Si se requiere confirmación por Postback pero aún no llegó
         if (MONETAG_SECRET && !session.confirmed_at) {
             await safeRollback(client);
             return res.status(400).json({
@@ -814,23 +813,55 @@ app.post('/api/v1/game/start', verifyToken, rewardRateLimit, async (req, res) =>
         const usage = await getDailyUsage(client, userId);
         if (Number(usage.game_count) >= MAX_GAME_REWARDS_PER_DAY) {
             await safeRollback(client);
-            return res.status(429).json({ success: false, error: `Alcanzaste el máximo diario de juegos.` });
+            return res.status(429).json({
+                success: false,
+                error: `Alcanzaste el máximo de ${MAX_GAME_REWARDS_PER_DAY} recompensas de juego por día.`
+            });
         }
 
-        const sessionId = newRewardSessionId();
-        const started = new Date();
-        const expires = new Date(started.getTime() + REWARD_SESSION_MAX_AGE_MS);
-
-        await client.query(
-            `INSERT INTO reward_sessions (session_id, user_id, reward_type, started_at, expires_at) VALUES ($1, $2, 'game', $3, $4)`,
-            [sessionId, userId, started, expires]
+        const recent = await client.query(
+            `SELECT claimed_at FROM reward_sessions WHERE user_id = $1 AND reward_type = 'game' AND claimed_at IS NOT NULL ORDER BY claimed_at DESC LIMIT 1`,
+            [userId]
         );
 
+        if (recent.rows.length > 0) {
+            const elapsed = Date.now() - new Date(recent.rows[0].claimed_at).getTime();
+            if (elapsed < GAME_COOLDOWN_MS) {
+                const remaining = Math.ceil((GAME_COOLDOWN_MS - elapsed) / 1000);
+                await safeRollback(client);
+                return res.status(429).json({ success: false, error: `Esperá ${remaining} segundos para iniciar otra sesión de juego.` });
+            }
+        }
+
+        const active = await client.query(
+            `SELECT session_id FROM reward_sessions WHERE user_id = $1 AND reward_type = 'game' AND claimed_at IS NULL AND expires_at > NOW() LIMIT 1`,
+            [userId]
+        );
+
+        let sessionId;
+        if (active.rows.length > 0) {
+            sessionId = active.rows[0].session_id;
+        } else {
+            sessionId = newRewardSessionId();
+            const started = new Date();
+            const expires = new Date(started.getTime() + REWARD_SESSION_MAX_AGE_MS);
+
+            await client.query(
+                `INSERT INTO reward_sessions (session_id, user_id, reward_type, started_at, expires_at) VALUES ($1, $2, 'game', $3, $4)`,
+                [sessionId, userId, started, expires]
+            );
+        }
+
         await client.query('COMMIT');
-        return res.json({ success: true, sessionId, waitSeconds: GAME_MIN_SECONDS });
+
+        return res.json({
+            success: true,
+            sessionId,
+            waitSeconds: GAME_MIN_SECONDS
+        });
     } catch (error) {
         await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'No se pudo iniciar el juego.' });
+        return res.status(500).json({ success: false, error: 'No se pudo iniciar la sesión de juego.' });
     } finally {
         client.release();
     }
@@ -840,7 +871,9 @@ app.post('/api/v1/game/claim', verifyToken, rewardRateLimit, async (req, res) =>
     const { sessionId } = req.body || {};
     const userId = req.user.userId;
 
-    if (!isValidRewardSessionId(sessionId)) return res.status(400).json({ success: false, error: 'Sesión inválida.' });
+    if (!isValidRewardSessionId(sessionId)) {
+        return res.status(400).json({ success: false, error: 'Sesión de recompensa inválida.' });
+    }
 
     const client = await db.connect();
     try {
@@ -852,27 +885,49 @@ app.post('/api/v1/game/claim', verifyToken, rewardRateLimit, async (req, res) =>
             [sessionId, userId]
         );
 
-        if (sessionRes.rows.length === 0 || sessionRes.rows[0].claimed_at) {
+        if (sessionRes.rows.length === 0) {
             await safeRollback(client);
-            return res.status(400).json({ success: false, error: 'Sesión no disponible o reclamada.' });
+            return res.status(404).json({ success: false, error: 'Sesión no encontrada.' });
         }
 
         const session = sessionRes.rows[0];
+        if (session.claimed_at) {
+            await safeRollback(client);
+            return res.status(409).json({ success: false, error: 'Esta recompensa ya fue reclamada.' });
+        }
+
         const now = Date.now();
         if (now < new Date(session.started_at).getTime() + GAME_MIN_SECONDS * 1000) {
             await safeRollback(client);
-            return res.status(400).json({ success: false, error: `Faltan segundos de juego.` });
+            return res.status(400).json({ success: false, error: `Todavía no pasaron ${GAME_MIN_SECONDS} segundos de juego.` });
         }
 
-        await client.query(
+        if (now > new Date(session.expires_at).getTime()) {
+            await safeRollback(client);
+            return res.status(400).json({ success: false, error: 'La sesión de recompensa expiró.' });
+        }
+
+        const usageUpdate = await client.query(
             `INSERT INTO reward_daily_usage (user_id, reward_date, video_count, game_count)
-             VALUES ($1, CURRENT_DATE, 0, 1) ON CONFLICT (user_id, reward_date)
-             DO UPDATE SET game_count = reward_daily_usage.game_count + 1`,
-            [userId]
+             VALUES ($1, CURRENT_DATE, 0, 1)
+             ON CONFLICT (user_id, reward_date)
+             DO UPDATE SET game_count = reward_daily_usage.game_count + 1
+             WHERE reward_daily_usage.game_count < $2 RETURNING game_count`,
+            [userId, MAX_GAME_REWARDS_PER_DAY]
         );
 
+        if (usageUpdate.rows.length === 0) {
+            await safeRollback(client);
+            return res.status(429).json({ success: false, error: 'Límite diario de juego alcanzado.' });
+        }
+
         const transId = `GAME_${sessionId}`;
-        await insertRewardEvent(client, { userId, sourceType: 'WEB_GAME', transId, points: GAME_REWARD_POINTS });
+        const eventInserted = await insertRewardEvent(client, { userId, sourceType: 'WEB_GAME', transId, points: GAME_REWARD_POINTS });
+
+        if (!eventInserted) {
+            await safeRollback(client);
+            return res.status(409).json({ success: false, error: 'Esta recompensa ya fue procesada.' });
+        }
 
         await client.query(`UPDATE reward_sessions SET claimed_at = NOW() WHERE session_id = $1`, [sessionId]);
         const balanceRes = await client.query(
@@ -881,106 +936,11 @@ app.post('/api/v1/game/claim', verifyToken, rewardRateLimit, async (req, res) =>
         );
 
         await client.query('COMMIT');
-        return res.json({ success: true, pointsAwarded: GAME_REWARD_POINTS, newBalance: balanceRes.rows[0].points_balance });
-    } catch (error) {
-        await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'Error del servidor.' });
-    } finally {
-        client.release();
-    }
-});
-
-// ============================================================
-// REFERIDOS & RETIRO
-// ============================================================
-
-app.get('/api/v1/user/referrals', verifyToken, async (req, res) => {
-    try {
-        const userRes = await db.query(`SELECT referral_code, total_referrals FROM web_users WHERE id = $1`, [req.user.userId]);
-        if (userRes.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuario no encontrado.' });
-        const user = userRes.rows[0];
-
-        const referralsRes = await db.query(
-            `SELECT email, created_at FROM web_users WHERE referred_by = $1 ORDER BY created_at DESC`,
-            [req.user.userId]
-        );
-
-        const referrals = referralsRes.rows.map(ref => {
-            const parts = String(ref.email).split('@');
-            const name = parts[0] || '';
-            const domain = parts[1] || '';
-            const maskedName = name.length > 2 ? `${name[0]}***${name[name.length - 1]}` : `${name[0] || '*'}`;
-            return { email: `${maskedName}@${domain}`, created_at: ref.created_at, points_earned: REFERRAL_BONUS };
-        });
-
         return res.json({
             success: true,
-            referral_code: user.referral_code,
-            total_referrals: Number(user.total_referrals) || 0,
-            total_points_earned: (Number(user.total_referrals) || 0) * REFERRAL_BONUS,
-            bonus_per_referral: REFERRAL_BONUS,
-            referrals
-        });
-    } catch (error) {
-        return res.status(500).json({ success: false, error: 'Error al consultar referidos.' });
-    }
-});
-
-app.post('/api/v1/withdraw', verifyToken, withdrawRateLimit, async (req, res) => {
-    const { amount, payout_method, account_details } = req.body || {};
-    const userId = req.user.userId;
-
-    const methodKey = normalizePayoutMethod(payout_method);
-    const withdrawAmount = normalizeMoney(amount);
-
-    if (!methodKey || withdrawAmount === null || withdrawAmount <= 0) {
-        return res.status(400).json({ success: false, error: 'Parámetros de retiro inválidos.' });
-    }
-
-    const methodConfig = PAYOUT_CONFIG[methodKey];
-    if (withdrawAmount < methodConfig.minAmount) {
-        return res.status(400).json({ success: false, error: `El monto mínimo es $${methodConfig.minAmount.toFixed(2)} USD.` });
-    }
-
-    const userFee = (withdrawAmount * methodConfig.fixedFeePercent) + methodConfig.fixedFeeAmount;
-    const finalAmountToSend = Math.max(0, withdrawAmount - userFee);
-    const pointsToDeduct = Math.round(withdrawAmount / POINT_TO_CURRENCY_RATIO);
-
-    const client = await db.connect();
-    try {
-        await client.query('BEGIN');
-        const userResult = await client.query(`SELECT points_balance FROM web_users WHERE id = $1 FOR UPDATE`, [userId]);
-        if (userResult.rows.length === 0) {
-            await safeRollback(client);
-            return res.status(404).json({ success: false, error: 'Usuario no encontrado.' });
-        }
-
-        if (Number(userResult.rows[0].points_balance) < pointsToDeduct) {
-            await safeRollback(client);
-            return res.status(400).json({ success: false, error: 'Saldo insuficiente en puntos.' });
-        }
-
-        const withdrawal = await client.query(
-            `INSERT INTO withdrawal_requests (user_id, amount, payout_method, account_details, status)
-             VALUES ($1, $2, $3, $4, 'pending') RETURNING *`,
-            [userId, withdrawAmount, methodKey, account_details.trim()]
-        );
-
-        const balanceUpdate = await client.query(
-            `UPDATE web_users SET points_balance = points_balance - $1 WHERE id = $2 AND points_balance >= $1 RETURNING points_balance`,
-            [pointsToDeduct, userId]
-        );
-
-        await insertRewardEvent(client, { userId, sourceType: 'WITHDRAWAL', transId: `WITHDRAWAL_${withdrawal.rows[0].id}`, points: -pointsToDeduct });
-
-        await client.query('COMMIT');
-        return res.status(201).json({
-            success: true,
-            message: 'Solicitud de retiro registrada con éxito.',
-            withdrawal: withdrawal.rows[0],
-            fee_applied: userFee.toFixed(2),
-            net_amount: finalAmountToSend.toFixed(2),
-            newBalance: balanceUpdate.rows[0].points_balance
+            pointsAwarded: GAME_REWARD_POINTS,
+            newBalance: balanceRes.rows[0].points_balance,
+            cooldownSeconds: GAME_COOLDOWN_MS / 1000
         });
     } catch (error) {
         await safeRollback(client);
@@ -990,94 +950,180 @@ app.post('/api/v1/withdraw', verifyToken, withdrawRateLimit, async (req, res) =>
     }
 });
 
-app.get('/api/withdrawals', verifyToken, async (req, res) => {
-    try {
-        const history = await db.query(`SELECT * FROM withdrawal_requests WHERE user_id = $1 ORDER BY created_at DESC`, [req.user.userId]);
-        return res.json({ success: true, withdrawals: history.rows });
-    } catch (error) {
-        return res.status(500).json({ success: false, error: 'Error al consultar el historial.' });
-    }
-});
-
-app.get('/api/v1/user/profile', verifyToken, async (req, res) => {
-    try {
-        const userRes = await db.query(`SELECT id, email, country_code, tier_level, points_balance, referral_code, total_referrals FROM web_users WHERE id = $1`, [req.user.userId]);
-        if (userRes.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuario no encontrado.' });
-        return res.json({ success: true, user: userRes.rows[0] });
-    } catch (error) {
-        return res.status(500).json({ success: false, error: 'Error al obtener el perfil.' });
-    }
-});
-
 // ============================================================
-// ADMIN
+// RETIRAR (WITHDRAWALS)
 // ============================================================
 
-app.get('/api/admin/withdrawals/pending', verifyAdmin, async (req, res) => {
-    try {
-        const result = await db.query(
-            `SELECT w.*, u.email FROM withdrawal_requests w LEFT JOIN web_users u ON w.user_id = u.id WHERE w.status = 'pending' ORDER BY w.created_at DESC`
-        );
-        return res.json({ success: true, withdrawals: result.rows });
-    } catch (error) {
-        return res.status(500).json({ success: false, error: 'Error de base de datos.' });
-    }
-});
+app.post('/api/v1/user/withdraw', verifyToken, withdrawRateLimit, async (req, res) => {
+    const { amount, method, destination } = req.body || {};
+    const userId = req.user.userId;
 
-app.patch('/api/admin/withdrawals/:id', verifyAdmin, async (req, res) => {
-    const { id } = req.params;
-    const { status } = req.body || {};
+    const parsedAmount = normalizeMoney(amount);
+    const normalizedMethod = normalizePayoutMethod(method);
 
-    if (!isValidUUID(id) || !['completed', 'rejected'].includes(status)) {
-        return res.status(400).json({ success: false, error: 'Parámetros inválidos.' });
+    if (!parsedAmount || parsedAmount <= 0) {
+        return res.status(400).json({ success: false, error: 'Monto inválido.' });
     }
+
+    if (!normalizedMethod || !PAYOUT_CONFIG[normalizedMethod]) {
+        return res.status(400).json({ success: false, error: 'Método de pago no soportado.' });
+    }
+
+    if (typeof destination !== 'string' || destination.trim().length === 0 || destination.length > 255) {
+        return res.status(400).json({ success: false, error: 'Destino de retiro inválido.' });
+    }
+
+    const config = PAYOUT_CONFIG[normalizedMethod];
+    if (parsedAmount < config.minAmount) {
+        return res.status(400).json({
+            success: false,
+            error: `El monto mínimo para ${normalizedMethod} es de $${config.minAmount.toFixed(2)} USD.`
+        });
+    }
+
+    const fee = normalizeMoney((parsedAmount * config.fixedFeePercent) + config.fixedFeeAmount);
+    const netAmount = normalizeMoney(parsedAmount - fee);
+    const requiredPoints = Math.round(parsedAmount / POINT_TO_CURRENCY_RATIO);
 
     const client = await db.connect();
     try {
         await client.query('BEGIN');
-        const checkResult = await client.query(`SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE`, [id]);
-        if (checkResult.rows.length === 0) {
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`withdraw:${userId}`]);
+
+        const userRes = await client.query(`SELECT points_balance FROM web_users WHERE id = $1 FOR UPDATE`, [userId]);
+        if (userRes.rows.length === 0) {
             await safeRollback(client);
-            return res.status(404).json({ success: false, error: 'Solicitud no encontrada.' });
+            return res.status(404).json({ success: false, error: 'Usuario no encontrado.' });
         }
 
-        const withdrawal = checkResult.rows[0];
-        if (withdrawal.status !== 'pending') {
+        const currentBalance = userRes.rows[0].points_balance;
+        if (currentBalance < requiredPoints) {
             await safeRollback(client);
-            return res.status(400).json({ success: false, error: 'La solicitud ya fue procesada.' });
+            return res.status(400).json({ success: false, error: 'Saldo de puntos insuficiente.' });
         }
 
-        const result = await client.query(`UPDATE withdrawal_requests SET status = $1 WHERE id = $2 RETURNING *`, [status, id]);
+        await client.query(`UPDATE web_users SET points_balance = points_balance - $1 WHERE id = $2`, [requiredPoints, userId]);
 
-        if (status === 'rejected') {
-            const pointsToRefund = Math.round(Number(withdrawal.amount) / POINT_TO_CURRENCY_RATIO);
-            await client.query(`UPDATE web_users SET points_balance = points_balance + $1 WHERE id = $2`, [pointsToRefund, withdrawal.user_id]);
-            await insertRewardEvent(client, { userId: withdrawal.user_id, sourceType: 'WITHDRAWAL_REFUND', transId: `WITHDRAWAL_REFUND_${id}`, points: pointsToRefund });
-        }
+        const withdrawRes = await client.query(
+            `INSERT INTO web_withdrawals (user_id, amount_usd, fee_usd, net_amount_usd, points_deducted, payout_method, payout_destination, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+             RETURNING id, status, created_at`,
+            [userId, parsedAmount, fee, netAmount, requiredPoints, normalizedMethod, destination.trim()]
+        );
 
         await client.query('COMMIT');
-        return res.json({ success: true, message: `Solicitud #${id} marcada como ${status}.`, withdrawal: result.rows[0] });
+
+        return res.json({
+            success: true,
+            withdrawal: withdrawRes.rows[0],
+            deductedPoints: requiredPoints,
+            netAmountUsd: netAmount
+        });
     } catch (error) {
         await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'Error al actualizar.' });
+        return res.status(500).json({ success: false, error: 'Error al procesar la solicitud de retiro.' });
     } finally {
         client.release();
     }
 });
 
 // ============================================================
-// INICIALIZACIÓN
+// ADMIN ENDPOINTS
 // ============================================================
 
-app.use((req, res) => res.status(404).json({ success: false, error: 'Ruta no encontrada.' }));
+app.get('/api/v1/admin/withdrawals', verifyAdmin, async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT w.*, u.email FROM web_withdrawals w JOIN web_users u ON w.user_id = u.id ORDER BY w.created_at DESC LIMIT 100`
+        );
+        return res.json({ success: true, withdrawals: result.rows });
+    } catch (error) {
+        return res.status(500).json({ success: false, error: 'Error al obtener los retiros.' });
+    }
+});
+
+app.patch('/api/v1/admin/withdrawals/:id', verifyAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body || {};
+
+    if (!['approved', 'rejected', 'completed'].includes(status)) {
+        return res.status(400).json({ success: false, error: 'Estado no válido.' });
+    }
+
+    const client = await db.connect();
+    try {
+        await client.query('BEGIN');
+
+        const currentRes = await client.query(`SELECT * FROM web_withdrawals WHERE id = $1 FOR UPDATE`, [id]);
+        if (currentRes.rows.length === 0) {
+            await safeRollback(client);
+            return res.status(404).json({ success: false, error: 'Retiro no encontrado.' });
+        }
+
+        const withdrawal = currentRes.rows[0];
+
+        if (withdrawal.status === 'rejected' || withdrawal.status === 'completed') {
+            await safeRollback(client);
+            return res.status(400).json({ success: false, error: 'El retiro ya fue finalizado previamente.' });
+        }
+
+        if (status === 'rejected') {
+            await client.query(
+                `UPDATE web_users SET points_balance = points_balance + $1 WHERE id = $2`,
+                [withdrawal.points_deducted, withdrawal.user_id]
+            );
+        }
+
+        const updated = await client.query(
+            `UPDATE web_withdrawals SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+            [status, id]
+        );
+
+        await client.query('COMMIT');
+        return res.json({ success: true, withdrawal: updated.rows[0] });
+    } catch (error) {
+        await safeRollback(client);
+        return res.status(500).json({ success: false, error: 'Error al actualizar el retiro.' });
+    } finally {
+        client.release();
+    }
+});
+
+// ============================================================
+// MAPEO DE COMPATIBILIDAD CON HERENCIA / FRONTEND EXISTENTE
+// ============================================================
+
+// Redirección directa para rutas del frontend que hacen llamadas a /api/ads o /api/game sin versión
+app.use('/api/ads/watch', (req, res, next) => { req.url = '/api/v1/web-video/start'; app.handle(req, res, next); });
+app.use('/api/ads/claim', (req, res, next) => { req.url = '/api/v1/web-video/claim'; app.handle(req, res, next); });
+app.use('/api/game/start', (req, res, next) => { req.url = '/api/v1/game/start'; app.handle(req, res, next); });
+app.use('/api/game/claim', (req, res, next) => { req.url = '/api/v1/game/claim'; app.handle(req, res, next); });
+
+// Servir la vista principal para peticiones raíz
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Capture-all para manejar SPA / navegación directa a páginas .html sin extensión
+app.get('*', (req, res) => {
+    if (req.path.startsWith('/api')) {
+        return res.status(404).json({ success: false, error: 'Ruta de API no encontrada.' });
+    }
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ============================================================
+// INICIALIZACIÓN DEL SERVIDOR
+// ============================================================
 
 async function startServer() {
     try {
-        await db.query('SELECT 1');
         await ensureRewardTables();
-        app.listen(PORT, () => console.log(`Servidor iniciado en puerto ${PORT}.`));
+        app.listen(PORT, () => {
+            console.log(`Servidor iniciado y escuchando en el puerto ${PORT}`);
+        });
     } catch (error) {
-        console.error('Error al iniciar el servidor:', error);
+        console.error('Error al inicializar las tablas de la base de datos:', error);
         process.exit(1);
     }
 }
