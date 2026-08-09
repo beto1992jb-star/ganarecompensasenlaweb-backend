@@ -1,4 +1,3 @@
-```javascript
 require('dotenv').config();
 
 const express = require('express');
@@ -3138,8 +3137,7 @@ app.post(
             }
 
             const payoutDescription =
-                `${methodKey} ` +
-                `(Neto: $${finalAmountToSend.toFixed(2)} USD - Fee: $${userFee.toFixed(2)})`;
+                methodKey;
 
             const withdrawal =
                 await client.query(
@@ -3688,4 +3686,3 @@ process.on(
 );
 
 startServer();
-```
