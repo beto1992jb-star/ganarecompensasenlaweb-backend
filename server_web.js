@@ -1,4 +1,6 @@
 ```javascript
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -12,7 +14,7 @@ const app = express();
 // CONFIGURACIÓN
 // ============================================================
 
-const PORT = process.env.PORT || 10000;
+const PORT = Number(process.env.PORT) || 10000;
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
@@ -20,18 +22,45 @@ const CPX_HASH_SECRET = process.env.CPX_HASH_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 
-// Producción: estas variables deben existir.
-if (!JWT_SECRET || JWT_SECRET.length < 32) {
+const CPX_APP_ID =
+    process.env.CPX_APP_ID || '35135';
+
+const VIDEO_AD_URL =
+    process.env.VIDEO_AD_URL ||
+    'https://omg10.com/4/11528482';
+
+// ============================================================
+// VALIDACIÓN DE VARIABLES DE ENTORNO
+// ============================================================
+
+if (
+    !JWT_SECRET ||
+    JWT_SECRET.length < 32
+) {
     throw new Error(
         'JWT_SECRET es obligatorio y debe tener al menos 32 caracteres.'
     );
 }
 
-if (!DATABASE_URL) {
-    throw new Error('DATABASE_URL es obligatorio.');
+if (
+    !ADMIN_SECRET ||
+    ADMIN_SECRET.length < 32
+) {
+    throw new Error(
+        'ADMIN_SECRET es obligatorio y debe tener al menos 32 caracteres.'
+    );
 }
 
-if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) {
+if (!DATABASE_URL) {
+    throw new Error(
+        'DATABASE_URL es obligatorio.'
+    );
+}
+
+if (
+    !CPX_HASH_SECRET ||
+    CPX_HASH_SECRET.length < 16
+) {
     throw new Error(
         'CPX_HASH_SECRET es obligatorio y debe tener al menos 16 caracteres.'
     );
@@ -39,7 +68,7 @@ if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) {
 
 if (!ALLOWED_ORIGIN) {
     throw new Error(
-        'ALLOWED_ORIGIN es obligatorio. Configúralo en Render con el dominio de Netlify.'
+        'ALLOWED_ORIGIN es obligatorio.'
     );
 }
 
@@ -47,9 +76,9 @@ if (!ALLOWED_ORIGIN) {
 // CONFIGURACIÓN DE NEGOCIO
 // ============================================================
 
+// 1000 puntos = 1 USD
 const POINT_TO_CURRENCY_RATIO = 0.001;
 
-// 1000 puntos = $1 USD
 const VIDEO_REWARD_POINTS = 5;
 const GAME_REWARD_POINTS = 1;
 const REFERRAL_BONUS = 25;
@@ -57,13 +86,17 @@ const REFERRAL_BONUS = 25;
 const MAX_VIDEO_REWARDS_PER_DAY = 5;
 const MAX_GAME_REWARDS_PER_DAY = 20;
 
-const VIDEO_COOLDOWN_MS = 10 * 60 * 1000;
-const GAME_COOLDOWN_MS = 60 * 1000;
+const VIDEO_COOLDOWN_MS =
+    10 * 60 * 1000;
+
+const GAME_COOLDOWN_MS =
+    60 * 1000;
 
 const VIDEO_MIN_SECONDS = 45;
 const GAME_MIN_SECONDS = 60;
 
-const REWARD_SESSION_MAX_AGE_MS = 15 * 60 * 1000;
+const REWARD_SESSION_MAX_AGE_MS =
+    15 * 60 * 1000;
 
 const PAYOUT_CONFIG = {
     binance: {
@@ -71,11 +104,13 @@ const PAYOUT_CONFIG = {
         fixedFeePercent: 0.0,
         fixedFeeAmount: 0.0
     },
+
     mercadopago: {
         minAmount: 5.00,
         fixedFeePercent: 0.0,
         fixedFeeAmount: 0.15
     },
+
     paypal: {
         minAmount: 5.00,
         fixedFeePercent: 0.015,
@@ -84,24 +119,47 @@ const PAYOUT_CONFIG = {
 };
 
 // ============================================================
-// EXPRESS / SEGURIDAD
+// EXPRESS
 // ============================================================
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
-// Limitar tamaño de requests JSON.
-app.use(express.json({ limit: '20kb' }));
+app.use(
+    express.json({
+        limit: '20kb'
+    })
+);
 
-// Headers básicos de seguridad.
-// No reemplazan Helmet, pero permiten mejorar seguridad sin agregar
-// una dependencia adicional al package.json en esta etapa.
+// ============================================================
+// HEADERS DE SEGURIDAD
+// ============================================================
+
 app.use((req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader(
+        'X-Content-Type-Options',
+        'nosniff'
+    );
+
+    res.setHeader(
+        'X-Frame-Options',
+        'DENY'
+    );
+
+    res.setHeader(
+        'Referrer-Policy',
+        'strict-origin-when-cross-origin'
+    );
+
+    res.setHeader(
+        'Permissions-Policy',
+        'camera=(), microphone=(), geolocation=()'
+    );
+
+    res.setHeader(
+        'Cross-Origin-Opener-Policy',
+        'same-origin'
+    );
 
     next();
 });
@@ -116,8 +174,8 @@ const allowedOrigins = ALLOWED_ORIGIN
     .filter(Boolean);
 
 const corsOptions = {
-    origin: function (origin, callback) {
-        // Permitir requests sin Origin, por ejemplo health checks.
+    origin(origin, callback) {
+        // Health checks y algunas herramientas no envían Origin.
         if (!origin) {
             return callback(null, true);
         }
@@ -126,59 +184,94 @@ const corsOptions = {
             return callback(null, true);
         }
 
-        return callback(new Error('Origen no permitido por CORS.'));
+        return callback(
+            new Error(
+                'Origen no permitido por CORS.'
+            )
+        );
     },
-    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+
+    methods: [
+        'GET',
+        'POST',
+        'PATCH',
+        'OPTIONS'
+    ],
+
     allowedHeaders: [
         'Content-Type',
         'Authorization',
-        'X-Requested-With',
         'Accept',
+        'X-Requested-With',
         'x-admin-secret'
     ],
+
     credentials: false,
+
     optionsSuccessStatus: 204
 };
 
-app.use(cors(corsOptions));
+app.use(
+    cors(corsOptions)
+);
 
 // ============================================================
-// RATE LIMITER SIMPLE EN MEMORIA
-// ============================================================
-//
-// No reemplaza un rate limiter distribuido si algún día usás varias
-// instancias. Para una instancia de Render sirve como primera barrera.
+// RATE LIMITER
 // ============================================================
 
 const rateLimitStores = new Map();
+
+function getClientIp(req) {
+    const forwarded =
+        req.headers['x-forwarded-for'];
+
+    if (typeof forwarded === 'string') {
+        return forwarded
+            .split(',')[0]
+            .trim();
+    }
+
+    return (
+        req.ip ||
+        req.socket?.remoteAddress ||
+        'unknown'
+    );
+}
 
 function rateLimit({
     windowMs,
     max,
     keyPrefix,
-    message = 'Demasiadas solicitudes. Intentá nuevamente más tarde.'
+    message
 }) {
     return (req, res, next) => {
-        const ip =
-            req.ip ||
-            req.headers['x-forwarded-for'] ||
-            req.socket.remoteAddress ||
-            'unknown';
+        const ip = getClientIp(req);
 
-        const key = `${keyPrefix}:${String(ip).split(',')[0].trim()}`;
+        const key =
+            `${keyPrefix}:${ip}`;
+
         const now = Date.now();
 
-        let record = rateLimitStores.get(key);
+        let record =
+            rateLimitStores.get(key);
 
-        if (!record || now >= record.resetAt) {
+        if (
+            !record ||
+            now >= record.resetAt
+        ) {
             record = {
                 count: 0,
-                resetAt: now + windowMs
+                resetAt:
+                    now + windowMs
             };
         }
 
         record.count += 1;
-        rateLimitStores.set(key, record);
+
+        rateLimitStores.set(
+            key,
+            record
+        );
 
         res.setHeader(
             'X-RateLimit-Limit',
@@ -187,18 +280,32 @@ function rateLimit({
 
         res.setHeader(
             'X-RateLimit-Remaining',
-            String(Math.max(0, max - record.count))
+            String(
+                Math.max(
+                    0,
+                    max - record.count
+                )
+            )
         );
 
         if (record.count > max) {
             res.setHeader(
                 'Retry-After',
-                String(Math.ceil((record.resetAt - now) / 1000))
+                String(
+                    Math.ceil(
+                        (
+                            record.resetAt -
+                            now
+                        ) / 1000
+                    )
+                )
             );
 
             return res.status(429).json({
                 success: false,
-                error: message
+                error:
+                    message ||
+                    'Demasiadas solicitudes. Intentá nuevamente más tarde.'
             });
         }
 
@@ -206,35 +313,49 @@ function rateLimit({
     };
 }
 
-// Limpieza periódica del rate limiter.
 setInterval(() => {
     const now = Date.now();
 
-    for (const [key, record] of rateLimitStores.entries()) {
-        if (now >= record.resetAt) {
+    for (
+        const [key, record]
+        of rateLimitStores.entries()
+    ) {
+        if (
+            now >= record.resetAt
+        ) {
             rateLimitStores.delete(key);
         }
     }
 }, 10 * 60 * 1000).unref();
 
-// Límites generales.
 const authRateLimit = rateLimit({
-    windowMs: 15 * 60 * 1000,
+    windowMs:
+        15 * 60 * 1000,
     max: 15,
     keyPrefix: 'auth',
-    message: 'Demasiados intentos. Esperá unos minutos antes de volver a intentar.'
+    message:
+        'Demasiados intentos. Esperá unos minutos antes de volver a intentar.'
 });
 
 const rewardRateLimit = rateLimit({
-    windowMs: 60 * 1000,
+    windowMs:
+        60 * 1000,
     max: 30,
     keyPrefix: 'reward'
 });
 
 const withdrawRateLimit = rateLimit({
-    windowMs: 10 * 60 * 1000,
+    windowMs:
+        10 * 60 * 1000,
     max: 10,
     keyPrefix: 'withdraw'
+});
+
+const cpxRateLimit = rateLimit({
+    windowMs:
+        60 * 1000,
+    max: 30,
+    keyPrefix: 'cpx'
 });
 
 // ============================================================
@@ -242,57 +363,102 @@ const withdrawRateLimit = rateLimit({
 // ============================================================
 
 const db = new Pool({
-    connectionString: DATABASE_URL,
+    connectionString:
+        DATABASE_URL,
+
     ssl: {
         rejectUnauthorized: false
     },
+
     max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000
+
+    idleTimeoutMillis:
+        30000,
+
+    connectionTimeoutMillis:
+        10000,
+
+    application_name:
+        'ganarecompensasenlaweb-backend'
 });
 
-db.on('error', (err) => {
-    console.error(
-        'Error inesperado en cliente inactivo de PostgreSQL:',
-        err
-    );
-});
+db.on(
+    'error',
+    err => {
+        console.error(
+            'Error inesperado en cliente inactivo de PostgreSQL:',
+            err
+        );
+    }
+);
 
 // ============================================================
-// FUNCIONES AUXILIARES
+// AUXILIARES
 // ============================================================
 
 function normalizeEmail(email) {
-    return String(email || '').trim().toLowerCase();
+    return String(email || '')
+        .trim()
+        .toLowerCase();
 }
 
 function isValidEmail(email) {
-    if (typeof email !== 'string') return false;
-    if (email.length < 5 || email.length > 255) return false;
+    if (
+        typeof email !== 'string'
+    ) {
+        return false;
+    }
 
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    if (
+        email.length < 5 ||
+        email.length > 255
+    ) {
+        return false;
+    }
+
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+        .test(email);
 }
 
-function normalizeCountryCode(countryCode) {
-    const value = String(countryCode || 'AR')
-        .trim()
-        .toUpperCase();
+function normalizeCountryCode(
+    countryCode
+) {
+    const value =
+        String(
+            countryCode || 'AR'
+        )
+            .trim()
+            .toUpperCase();
 
-    return /^[A-Z]{2}$/.test(value) ? value : null;
+    if (
+        /^[A-Z]{2}$/.test(value)
+    ) {
+        return value;
+    }
+
+    return null;
 }
 
-function normalizeReferralCode(code) {
+function normalizeReferralCode(
+    code
+) {
     return String(code || '')
         .trim()
         .toUpperCase();
 }
 
-function normalizePayoutMethod(method) {
-    const value = String(method || '')
-        .trim()
-        .toLowerCase();
+function normalizePayoutMethod(
+    method
+) {
+    const value =
+        String(method || '')
+            .trim()
+            .toLowerCase();
 
-    if (value === 'paypal' || value.includes('paypal')) {
+    if (
+        value === 'paypal' ||
+        value.includes('paypal')
+    ) {
         return 'paypal';
     }
 
@@ -304,7 +470,10 @@ function normalizePayoutMethod(method) {
         return 'mercadopago';
     }
 
-    if (value === 'binance' || value.includes('binance')) {
+    if (
+        value === 'binance' ||
+        value.includes('binance')
+    ) {
         return 'binance';
     }
 
@@ -312,23 +481,58 @@ function normalizePayoutMethod(method) {
 }
 
 function normalizeMoney(value) {
-    const number = Number(value);
+    const number =
+        Number(value);
 
-    if (!Number.isFinite(number)) {
+    if (
+        !Number.isFinite(number)
+    ) {
         return null;
     }
 
-    return Math.round(number * 100) / 100;
+    return Math.round(
+        number * 100
+    ) / 100;
 }
 
 function newRewardSessionId() {
-    return crypto.randomBytes(32).toString('hex');
+    return crypto
+        .randomBytes(32)
+        .toString('hex');
 }
 
-// Lock lógico de PostgreSQL por usuario + tipo de recompensa.
-// Evita que dos requests simultáneos puedan saltarse cooldown/límites.
-async function lockRewardOperation(client, userId, rewardType) {
-    const key = `${String(userId)}:${String(rewardType)}`;
+function isValidUUID(value) {
+    return typeof value === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+            .test(value);
+}
+
+function isValidRewardSessionId(
+    value
+) {
+    return (
+        typeof value === 'string' &&
+        /^[a-f0-9]{64}$/.test(value)
+    );
+}
+
+function safeRollback(client) {
+    return client
+        .query('ROLLBACK')
+        .catch(() => {});
+}
+
+// ============================================================
+// LOCK DE RECOMPENSA
+// ============================================================
+
+async function lockRewardOperation(
+    client,
+    userId,
+    rewardType
+) {
+    const key =
+        `${String(userId)}:${String(rewardType)}`;
 
     await client.query(
         'SELECT pg_advisory_xact_lock(hashtext($1))',
@@ -336,116 +540,320 @@ async function lockRewardOperation(client, userId, rewardType) {
     );
 }
 
-async function getDailyUsage(client, userId) {
-    const result = await client.query(
-        `SELECT video_count, game_count
-         FROM reward_daily_usage
-         WHERE user_id = $1
-           AND reward_date = CURRENT_DATE`,
-        [String(userId)]
-    );
+// ============================================================
+// USO DIARIO
+// ============================================================
 
-    return result.rows[0] || {
-        video_count: 0,
-        game_count: 0
-    };
+async function getDailyUsage(
+    client,
+    userId
+) {
+    const result =
+        await client.query(
+            `SELECT
+                video_count,
+                game_count
+             FROM reward_daily_usage
+             WHERE user_id = $1
+               AND reward_date = CURRENT_DATE`,
+            [userId]
+        );
+
+    if (
+        result.rows.length === 0
+    ) {
+        return {
+            video_count: 0,
+            game_count: 0
+        };
+    }
+
+    return result.rows[0];
 }
 
 // ============================================================
-// CREACIÓN DE TABLAS DE RECOMPENSAS
+// EVENTO DE RECOMPENSA
+// ============================================================
+
+async function insertRewardEvent(
+    client,
+    {
+        userId,
+        sourceType,
+        transId,
+        points
+    }
+) {
+    const result =
+        await client.query(
+            `INSERT INTO web_reward_events
+                (
+                    user_id,
+                    source_type,
+                    trans_id,
+                    points_awarded
+                )
+             VALUES
+                ($1, $2, $3, $4)
+             ON CONFLICT (trans_id)
+             DO NOTHING
+             RETURNING id`,
+            [
+                userId,
+                sourceType,
+                transId,
+                points
+            ]
+        );
+
+    return (
+        result.rows.length > 0
+    );
+}
+
+// ============================================================
+// TABLAS AUXILIARES
 // ============================================================
 
 async function ensureRewardTables() {
     await db.query(`
         CREATE TABLE IF NOT EXISTS reward_sessions (
             session_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
+            user_id UUID NOT NULL,
             reward_type TEXT NOT NULL
-                CHECK (reward_type IN ('video', 'game')),
+                CHECK (
+                    reward_type IN ('video', 'game')
+                ),
             started_at TIMESTAMPTZ NOT NULL,
             expires_at TIMESTAMPTZ NOT NULL,
             claimed_at TIMESTAMPTZ NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_reward_sessions_user_type
-        ON reward_sessions(user_id, reward_type);
-
-        CREATE INDEX IF NOT EXISTS idx_reward_sessions_claimed
-        ON reward_sessions(user_id, reward_type, claimed_at);
-
         CREATE TABLE IF NOT EXISTS reward_daily_usage (
-            user_id TEXT NOT NULL,
+            user_id UUID NOT NULL,
             reward_date DATE NOT NULL,
             video_count INTEGER NOT NULL DEFAULT 0,
             game_count INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (user_id, reward_date)
+            PRIMARY KEY (
+                user_id,
+                reward_date
+            )
         );
+    `);
+
+    // Índices.
+    await db.query(`
+        CREATE INDEX IF NOT EXISTS
+        idx_reward_sessions_user_type
+        ON reward_sessions(
+            user_id,
+            reward_type
+        );
+
+        CREATE INDEX IF NOT EXISTS
+        idx_reward_sessions_claimed
+        ON reward_sessions(
+            user_id,
+            reward_type,
+            claimed_at
+        );
+
+        CREATE INDEX IF NOT EXISTS
+        idx_reward_sessions_expiry
+        ON reward_sessions(
+            expires_at
+        );
+    `);
+
+    // Intentar garantizar FK en reward_sessions.
+    await db.query(`
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname =
+                    'reward_sessions_user_id_fkey'
+            ) THEN
+                ALTER TABLE reward_sessions
+                ADD CONSTRAINT
+                    reward_sessions_user_id_fkey
+                FOREIGN KEY (user_id)
+                REFERENCES web_users(id)
+                ON DELETE CASCADE;
+            END IF;
+        END $$;
+    `);
+
+    // FK de reward_daily_usage.
+    await db.query(`
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname =
+                    'reward_daily_usage_user_id_fkey'
+            ) THEN
+                ALTER TABLE reward_daily_usage
+                ADD CONSTRAINT
+                    reward_daily_usage_user_id_fkey
+                FOREIGN KEY (user_id)
+                REFERENCES web_users(id)
+                ON DELETE CASCADE;
+            END IF;
+        END $$;
+    `);
+
+    // Limpiar sesiones expiradas antiguas.
+    await db.query(`
+        DELETE FROM reward_sessions
+        WHERE expires_at <
+            NOW() - INTERVAL '2 days'
     `);
 }
 
 // ============================================================
-// MIDDLEWARE JWT
+// JWT
 // ============================================================
 
-const verifyToken = (req, res, next) => {
-    const authHeader = req.headers.authorization;
+function createUserToken(user) {
+    return jwt.sign(
+        {
+            userId: user.id,
+            email: user.email
+        },
+        JWT_SECRET,
+        {
+            expiresIn: '7d',
+            issuer:
+                'ganarecompensasenlaweb'
+        }
+    );
+}
+
+const verifyToken = (
+    req,
+    res,
+    next
+) => {
+    const authHeader =
+        req.headers.authorization;
 
     if (
         !authHeader ||
         typeof authHeader !== 'string' ||
-        !authHeader.startsWith('Bearer ')
+        !authHeader.startsWith(
+            'Bearer '
+        )
     ) {
         return res.status(401).json({
             success: false,
-            error: 'Acceso denegado. Token no provisto.'
+            error:
+                'Acceso denegado. Token no provisto.'
         });
     }
 
-    const token = authHeader.slice(7).trim();
+    const token =
+        authHeader
+            .slice(7)
+            .trim();
 
     if (!token) {
         return res.status(401).json({
             success: false,
-            error: 'Token no provisto.'
+            error:
+                'Token no provisto.'
         });
     }
 
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const decoded =
+            jwt.verify(
+                token,
+                JWT_SECRET,
+                {
+                    issuer:
+                        'ganarecompensasenlaweb'
+                }
+            );
 
-        if (!decoded || !decoded.userId) {
+        if (
+            !decoded ||
+            !decoded.userId ||
+            !isValidUUID(
+                String(decoded.userId)
+            )
+        ) {
             return res.status(403).json({
                 success: false,
-                error: 'Token inválido.'
+                error:
+                    'Token inválido.'
             });
         }
 
         req.user = decoded;
+
         next();
-    } catch (err) {
+    } catch (error) {
         return res.status(403).json({
             success: false,
-            error: 'Token inválido o expirado.'
+            error:
+                'Token inválido o expirado.'
         });
     }
 };
 
 // ============================================================
-// MIDDLEWARE ADMIN
+// ADMIN
 // ============================================================
 
-const verifyAdmin = (req, res, next) => {
-    const secret = req.headers['x-admin-secret'];
+const verifyAdmin = (
+    req,
+    res,
+    next
+) => {
+    const provided =
+        req.headers['x-admin-secret'];
 
     if (
-        !ADMIN_SECRET ||
-        typeof secret !== 'string' ||
-        secret.length === 0 ||
-        secret !== ADMIN_SECRET
+        typeof provided !== 'string' ||
+        provided.length === 0
     ) {
         return res.status(401).json({
             success: false,
-            error: 'No autorizado.'
+            error:
+                'No autorizado.'
+        });
+    }
+
+    const providedBuffer =
+        Buffer.from(provided);
+
+    const expectedBuffer =
+        Buffer.from(ADMIN_SECRET);
+
+    if (
+        providedBuffer.length !==
+        expectedBuffer.length
+    ) {
+        return res.status(401).json({
+            success: false,
+            error:
+                'No autorizado.'
+        });
+    }
+
+    if (
+        !crypto.timingSafeEqual(
+            providedBuffer,
+            expectedBuffer
+        )
+    ) {
+        return res.status(401).json({
+            success: false,
+            error:
+                'No autorizado.'
         });
     }
 
@@ -456,67 +864,124 @@ const verifyAdmin = (req, res, next) => {
 // HEALTH CHECK
 // ============================================================
 
-app.get('/', (req, res) => {
-    res.status(200).json({
-        success: true,
-        message: 'Servidor activo',
-        status: 'ok'
-    });
-});
+app.get(
+    '/',
+    async (req, res) => {
+        return res.status(200).json({
+            success: true,
+            message:
+                'Servidor activo',
+            status: 'ok'
+        });
+    }
+);
+
+app.get(
+    '/health',
+    async (req, res) => {
+        try {
+            await db.query(
+                'SELECT 1'
+            );
+
+            return res.status(200).json({
+                success: true,
+                status: 'ok',
+                database: 'connected'
+            });
+        } catch (error) {
+            return res.status(503).json({
+                success: false,
+                status: 'error',
+                database:
+                    'unavailable'
+            });
+        }
+    }
+);
 
 // ============================================================
-// CPX - GENERAR URL
+// CPX - SURVEY URL
 // ============================================================
 
 app.get(
     '/api/v1/cpx/survey-url',
     verifyToken,
+    cpxRateLimit,
     async (req, res) => {
         try {
-            const result = await db.query(
-                `SELECT id, email, country_code
-                 FROM web_users
-                 WHERE id = $1`,
-                [req.user.userId]
-            );
+            const result =
+                await db.query(
+                    `SELECT
+                        id,
+                        email,
+                        country_code
+                     FROM web_users
+                     WHERE id = $1`,
+                    [req.user.userId]
+                );
 
-            if (result.rows.length === 0) {
+            if (
+                result.rows.length === 0
+            ) {
                 return res.status(404).json({
                     success: false,
-                    error: 'Usuario no encontrado.'
+                    error:
+                        'Usuario no encontrado.'
                 });
             }
 
-            const user = result.rows[0];
-            const userId = String(user.id);
+            const user =
+                result.rows[0];
 
-            const secureHash = crypto
-                .createHash('md5')
-                .update(`${userId}-${CPX_HASH_SECRET}`)
-                .digest('hex');
+            const userId =
+                String(user.id);
 
-            const params = new URLSearchParams({
-                app_id: '35135',
-                ext_user_id: userId,
-                secure_hash: secureHash,
-                username: user.email,
-                email: user.email,
-                user_country_code: user.country_code || 'AR'
-            });
+            const secureHash =
+                crypto
+                    .createHash('md5')
+                    .update(
+                        `${userId}-${CPX_HASH_SECRET}`
+                    )
+                    .digest('hex');
+
+            const params =
+                new URLSearchParams({
+                    app_id:
+                        String(CPX_APP_ID),
+
+                    ext_user_id:
+                        userId,
+
+                    secure_hash:
+                        secureHash,
+
+                    username:
+                        user.email,
+
+                    email:
+                        user.email,
+
+                    user_country_code:
+                        user.country_code ||
+                        'AR'
+                });
 
             return res.json({
                 success: true,
-                url: `https://offers.cpx-research.com/index.php?${params.toString()}`
+                url:
+                    `https://offers.cpx-research.com/index.php?${params.toString()}`
             });
         } catch (error) {
             console.error(
-                'Error generando URL de CPX:',
+                'Error generando URL CPX:',
                 error
             );
 
             return res.status(500).json({
                 success: false,
-                error: 'No se pudo preparar CPX Research.'
+                error:
+                    'No se pudo preparar CPX Research.'
             });
         }
     }
@@ -526,199 +991,309 @@ app.get(
 // CPX POSTBACK
 // ============================================================
 
-app.get('/api/cpx-postback', async (req, res) => {
-    const {
-        user_id,
-        amount_usd,
-        trans_id,
-        status,
-        hash
-    } = req.query;
+app.get(
+    '/api/cpx-postback',
+    async (req, res) => {
+        const {
+            user_id,
+            amount_usd,
+            trans_id,
+            status,
+            hash
+        } = req.query;
 
-    if (
-        !user_id ||
-        !trans_id ||
-        status === undefined ||
-        status === null ||
-        !hash
-    ) {
-        return res.status(200).send('OK');
-    }
-
-    const computedHash = crypto
-        .createHash('md5')
-        .update(`${trans_id}-${CPX_HASH_SECRET}`)
-        .digest('hex');
-
-    if (
-        computedHash.toLowerCase() !==
-        String(hash).toLowerCase()
-    ) {
-        console.error('Firma HASH de CPX inválida.');
-        return res.status(200).send('OK');
-    }
-
-    const client = await db.connect();
-
-    try {
-        await client.query('BEGIN');
-
-        const userCheck = await client.query(
-            'SELECT id FROM web_users WHERE id = $1',
-            [user_id]
-        );
-
-        if (userCheck.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(200).send('OK');
+        // CPX recibe OK para evitar reintentos
+        // innecesarios de parámetros inválidos.
+        if (
+            !user_id ||
+            !trans_id ||
+            status === undefined ||
+            status === null ||
+            !hash
+        ) {
+            return res
+                .status(200)
+                .send('OK');
         }
 
-        const transactionId = String(trans_id);
+        if (
+            !isValidUUID(
+                String(user_id)
+            )
+        ) {
+            return res
+                .status(200)
+                .send('OK');
+        }
 
-        // ----------------------------------------------------
-        // STATUS 1 = COMPLETADA
-        // ----------------------------------------------------
+        const transactionId =
+            String(trans_id)
+                .trim();
 
-        if (String(status) === '1') {
-            const amountUsdNumber = Number(amount_usd);
+        if (
+            transactionId.length < 1 ||
+            transactionId.length > 128
+        ) {
+            return res
+                .status(200)
+                .send('OK');
+        }
+
+        const computedHash =
+            crypto
+                .createHash('md5')
+                .update(
+                    `${transactionId}-${CPX_HASH_SECRET}`
+                )
+                .digest('hex');
+
+        const receivedHash =
+            String(hash)
+                .trim()
+                .toLowerCase();
+
+        if (
+            computedHash !==
+            receivedHash
+        ) {
+            console.error(
+                'Firma HASH de CPX inválida.'
+            );
+
+            return res
+                .status(200)
+                .send('OK');
+        }
+
+        const client =
+            await db.connect();
+
+        try {
+            await client.query(
+                'BEGIN'
+            );
+
+            const userCheck =
+                await client.query(
+                    `SELECT id
+                     FROM web_users
+                     WHERE id = $1`,
+                    [user_id]
+                );
 
             if (
-                !Number.isFinite(amountUsdNumber) ||
-                amountUsdNumber <= 0
+                userCheck.rows.length === 0
             ) {
-                await client.query('ROLLBACK');
-                return res.status(200).send('OK');
-            }
-
-            const pointsAwarded = Math.round(
-                amountUsdNumber / POINT_TO_CURRENCY_RATIO
-            );
-
-            if (pointsAwarded <= 0) {
-                await client.query('ROLLBACK');
-                return res.status(200).send('OK');
-            }
-
-            const existingTx = await client.query(
-                `SELECT id
-                 FROM web_reward_events
-                 WHERE trans_id = $1`,
-                [transactionId]
-            );
-
-            if (existingTx.rows.length === 0) {
-                await client.query(
-                    `UPDATE web_users
-                     SET points_balance =
-                         points_balance + $1
-                     WHERE id = $2`,
-                    [pointsAwarded, user_id]
+                await safeRollback(
+                    client
                 );
 
-                await client.query(
-                    `INSERT INTO web_reward_events
-                        (user_id, source_type, trans_id, points_awarded)
-                     VALUES
-                        ($1, $2, $3, $4)
-                     ON CONFLICT (trans_id) DO NOTHING`,
-                    [
-                        user_id,
-                        'CPX_RESEARCH',
-                        transactionId,
-                        pointsAwarded
-                    ]
-                );
+                return res
+                    .status(200)
+                    .send('OK');
             }
-        }
 
-        // ----------------------------------------------------
-        // STATUS 2 = REVERSIÓN
-        // ----------------------------------------------------
+            // =================================================
+            // COMPLETADA
+            // =================================================
 
-        else if (String(status) === '2') {
-            const originalTx = await client.query(
-                `SELECT user_id, points_awarded
-                 FROM web_reward_events
-                 WHERE trans_id = $1
-                 LIMIT 1`,
-                [transactionId]
-            );
+            if (
+                String(status) === '1'
+            ) {
+                const amount =
+                    Number(amount_usd);
 
-            if (originalTx.rows.length > 0) {
-                const original = originalTx.rows[0];
-
-                // La reversión solo puede aplicarse al mismo usuario.
-                if (String(original.user_id) === String(user_id)) {
-                    const reversalId = `${transactionId}_REV`;
-
-                    const existingReversal = await client.query(
-                        `SELECT id
-                         FROM web_reward_events
-                         WHERE trans_id = $1`,
-                        [reversalId]
+                if (
+                    !Number.isFinite(amount) ||
+                    amount <= 0 ||
+                    amount > 100000
+                ) {
+                    await safeRollback(
+                        client
                     );
 
-                    // IMPORTANTE:
-                    // Solo descontamos una vez.
-                    if (existingReversal.rows.length === 0) {
-                        const originalPoints = Math.abs(
-                            Number(original.points_awarded) || 0
+                    return res
+                        .status(200)
+                        .send('OK');
+                }
+
+                const points =
+                    Math.round(
+                        amount /
+                        POINT_TO_CURRENCY_RATIO
+                    );
+
+                if (
+                    points <= 0
+                ) {
+                    await safeRollback(
+                        client
+                    );
+
+                    return res
+                        .status(200)
+                        .send('OK');
+                }
+
+                // Primero intentamos crear el evento.
+                // Esto garantiza idempotencia.
+                const eventInserted =
+                    await insertRewardEvent(
+                        client,
+                        {
+                            userId:
+                                user_id,
+
+                            sourceType:
+                                'CPX_RESEARCH',
+
+                            transId:
+                                transactionId,
+
+                            points
+                        }
+                    );
+
+                if (
+                    eventInserted
+                ) {
+                    const balance =
+                        await client.query(
+                            `UPDATE web_users
+                             SET points_balance =
+                                 points_balance + $1
+                             WHERE id = $2
+                             RETURNING id`,
+                            [
+                                points,
+                                user_id
+                            ]
                         );
 
-                        if (originalPoints > 0) {
-                            await client.query(
-                                `UPDATE web_users
-                                 SET points_balance =
-                                     GREATEST(
-                                         0,
-                                         points_balance - $1
-                                     )
-                                 WHERE id = $2`,
-                                [originalPoints, user_id]
+                    if (
+                        balance.rows.length === 0
+                    ) {
+                        throw new Error(
+                            'No se pudo actualizar el saldo CPX.'
+                        );
+                    }
+                }
+            }
+
+            // =================================================
+            // REVERSIÓN
+            // =================================================
+
+            else if (
+                String(status) === '2'
+            ) {
+                const original =
+                    await client.query(
+                        `SELECT
+                            user_id,
+                            points_awarded
+                         FROM web_reward_events
+                         WHERE trans_id = $1
+                           AND source_type =
+                               'CPX_RESEARCH'
+                         LIMIT 1`,
+                        [transactionId]
+                    );
+
+                if (
+                    original.rows.length > 0 &&
+                    String(
+                        original.rows[0].user_id
+                    ) === String(user_id)
+                ) {
+                    const points =
+                        Math.abs(
+                            Number(
+                                original.rows[0]
+                                    .points_awarded
+                            ) || 0
+                        );
+
+                    if (
+                        points > 0
+                    ) {
+                        const reversalId =
+                            `${transactionId}_REV`;
+
+                        const reversalInserted =
+                            await insertRewardEvent(
+                                client,
+                                {
+                                    userId:
+                                        user_id,
+
+                                    sourceType:
+                                        'CPX_RESEARCH_REVERSED',
+
+                                    transId:
+                                        reversalId,
+
+                                    points:
+                                        -points
+                                }
                             );
 
-                            await client.query(
-                                `INSERT INTO web_reward_events
-                                    (
-                                        user_id,
-                                        source_type,
-                                        trans_id,
-                                        points_awarded
-                                    )
-                                 VALUES
-                                    ($1, $2, $3, $4)
-                                 ON CONFLICT (trans_id) DO NOTHING`,
-                                [
-                                    user_id,
-                                    'CPX_RESEARCH_REVERSED',
-                                    reversalId,
-                                    -originalPoints
-                                ]
-                            );
+                        if (
+                            reversalInserted
+                        ) {
+                            const balance =
+                                await client.query(
+                                    `UPDATE web_users
+                                     SET points_balance =
+                                         GREATEST(
+                                             0,
+                                             points_balance - $1
+                                         )
+                                     WHERE id = $2
+                                     RETURNING id`,
+                                    [
+                                        points,
+                                        user_id
+                                    ]
+                                );
+
+                            if (
+                                balance.rows.length === 0
+                            ) {
+                                throw new Error(
+                                    'No se pudo actualizar el saldo por reversión CPX.'
+                                );
+                            }
                         }
                     }
                 }
             }
+
+            await client.query(
+                'COMMIT'
+            );
+
+            return res
+                .status(200)
+                .send('OK');
+        } catch (error) {
+            await safeRollback(
+                client
+            );
+
+            console.error(
+                'Error procesando postback CPX:',
+                error
+            );
+
+            return res
+                .status(200)
+                .send('OK');
+        } finally {
+            client.release();
         }
-
-        await client.query('COMMIT');
-
-        return res.status(200).send('OK');
-    } catch (error) {
-        await client.query('ROLLBACK');
-
-        console.error(
-            'Error procesando postback CPX:',
-            error
-        );
-
-        // CPX normalmente espera respuesta OK para evitar
-        // reintentos innecesarios del mismo postback.
-        return res.status(200).send('OK');
-    } finally {
-        client.release();
     }
-});
+);
 
 // ============================================================
 // AUTH - REGISTRO
@@ -741,196 +1316,288 @@ app.post(
         ) {
             return res.status(400).json({
                 success: false,
-                error: 'Email y contraseña requeridos.'
+                error:
+                    'Email y contraseña requeridos.'
             });
         }
 
-        const normalizedEmail = normalizeEmail(email);
+        const normalizedEmail =
+            normalizeEmail(email);
 
-        if (!isValidEmail(normalizedEmail)) {
+        if (
+            !isValidEmail(
+                normalizedEmail
+            )
+        ) {
             return res.status(400).json({
                 success: false,
-                error: 'El correo electrónico no es válido.'
+                error:
+                    'El correo electrónico no es válido.'
             });
         }
 
-        if (password.length < 8 || password.length > 128) {
+        if (
+            password.length < 8 ||
+            password.length > 128
+        ) {
             return res.status(400).json({
                 success: false,
-                error: 'La contraseña debe tener entre 8 y 128 caracteres.'
+                error:
+                    'La contraseña debe tener entre 8 y 128 caracteres.'
             });
         }
 
-        const userCountry = normalizeCountryCode(country_code);
+        const userCountry =
+            normalizeCountryCode(
+                country_code
+            );
 
         if (!userCountry) {
             return res.status(400).json({
                 success: false,
-                error: 'Código de país inválido.'
+                error:
+                    'Código de país inválido.'
             });
         }
 
-        const referralCode = normalizeReferralCode(
-            referral_code
-        );
+        const referralCode =
+            normalizeReferralCode(
+                referral_code
+            );
 
         if (
             referralCode &&
-            !/^[A-Z0-9_-]{3,20}$/.test(referralCode)
+            !/^[A-Z0-9_-]{3,20}$/
+                .test(referralCode)
         ) {
             return res.status(400).json({
                 success: false,
-                error: 'Código de referido inválido.'
+                error:
+                    'Código de referido inválido.'
             });
         }
 
-        const client = await db.connect();
+        const client =
+            await db.connect();
 
         try {
-            await client.query('BEGIN');
-
-            const checkUser = await client.query(
-                `SELECT id
-                 FROM web_users
-                 WHERE email = $1`,
-                [normalizedEmail]
+            await client.query(
+                'BEGIN'
             );
 
-            if (checkUser.rows.length > 0) {
-                await client.query('ROLLBACK');
+            // Bloqueo sobre el email.
+            await client.query(
+                `SELECT
+                    pg_advisory_xact_lock(
+                        hashtext($1)
+                    )`,
+                [
+                    `register:${normalizedEmail}`
+                ]
+            );
+
+            const checkUser =
+                await client.query(
+                    `SELECT id
+                     FROM web_users
+                     WHERE email = $1`,
+                    [normalizedEmail]
+                );
+
+            if (
+                checkUser.rows.length > 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(400).json({
                     success: false,
-                    error: 'El correo electrónico ya está registrado.'
+                    error:
+                        'El correo electrónico ya está registrado.'
                 });
             }
 
             let referrerId = null;
 
             if (referralCode) {
-                const referrerCheck = await client.query(
-                    `SELECT id
-                     FROM web_users
-                     WHERE referral_code = $1
-                     LIMIT 1`,
-                    [referralCode]
-                );
+                const referrerCheck =
+                    await client.query(
+                        `SELECT id
+                         FROM web_users
+                         WHERE referral_code = $1
+                         LIMIT 1`,
+                        [referralCode]
+                    );
 
-                if (referrerCheck.rows.length > 0) {
-                    referrerId = referrerCheck.rows[0].id;
+                if (
+                    referrerCheck.rows.length > 0
+                ) {
+                    referrerId =
+                        referrerCheck.rows[0].id;
                 }
             }
 
-            const myReferralCode = crypto
-                .randomBytes(8)
-                .toString('hex')
-                .toUpperCase()
-                .slice(0, 16);
+            // Generar código único.
+            let myReferralCode = null;
 
-            const hashedPassword = await bcrypt.hash(
-                password,
-                12
-            );
+            for (
+                let attempt = 0;
+                attempt < 10;
+                attempt++
+            ) {
+                const candidate =
+                    crypto
+                        .randomBytes(8)
+                        .toString('hex')
+                        .toUpperCase()
+                        .slice(0, 16);
 
-            const newUser = await client.query(
-                `INSERT INTO web_users
-                    (
-                        email,
-                        password_hash,
-                        country_code,
-                        referral_code,
-                        referred_by
-                    )
-                 VALUES
-                    ($1, $2, $3, $4, $5)
-                 RETURNING
-                    id,
-                    email,
-                    country_code,
-                    tier_level,
-                    points_balance,
-                    referral_code,
-                    total_referrals`,
-                [
-                    normalizedEmail,
-                    hashedPassword,
-                    userCountry,
-                    myReferralCode,
-                    referrerId
-                ]
-            );
+                const exists =
+                    await client.query(
+                        `SELECT 1
+                         FROM web_users
+                         WHERE referral_code = $1
+                         LIMIT 1`,
+                        [candidate]
+                    );
 
-            if (referrerId) {
+                if (
+                    exists.rows.length === 0
+                ) {
+                    myReferralCode =
+                        candidate;
+                    break;
+                }
+            }
+
+            if (!myReferralCode) {
+                throw new Error(
+                    'No se pudo generar un código de referido único.'
+                );
+            }
+
+            const hashedPassword =
+                await bcrypt.hash(
+                    password,
+                    12
+                );
+
+            const newUser =
                 await client.query(
-                    `UPDATE web_users
-                     SET
-                        points_balance =
-                            points_balance + $1,
-                        total_referrals =
-                            total_referrals + 1
-                     WHERE id = $2`,
+                    `INSERT INTO web_users
+                        (
+                            email,
+                            password_hash,
+                            country_code,
+                            referral_code,
+                            referred_by
+                        )
+                     VALUES
+                        ($1, $2, $3, $4, $5)
+                     RETURNING
+                        id,
+                        email,
+                        country_code,
+                        tier_level,
+                        points_balance,
+                        referral_code,
+                        total_referrals`,
                     [
-                        REFERRAL_BONUS,
+                        normalizedEmail,
+                        hashedPassword,
+                        userCountry,
+                        myReferralCode,
                         referrerId
                     ]
                 );
 
+            const user =
+                newUser.rows[0];
+
+            // Bono de referido.
+            if (referrerId) {
                 const referralTransactionId =
-                    `REF_${Date.now()}_${crypto
+                    `REF_${user.id}_${crypto
                         .randomBytes(8)
                         .toString('hex')}`;
 
-                await client.query(
-                    `INSERT INTO web_reward_events
-                        (
-                            user_id,
-                            source_type,
-                            trans_id,
-                            points_awarded
-                        )
-                     VALUES
-                        ($1, $2, $3, $4)`,
-                    [
-                        referrerId,
-                        'REFERRAL_BONUS',
-                        referralTransactionId,
-                        REFERRAL_BONUS
-                    ]
-                );
+                const eventInserted =
+                    await insertRewardEvent(
+                        client,
+                        {
+                            userId:
+                                referrerId,
+
+                            sourceType:
+                                'REFERRAL_BONUS',
+
+                            transId:
+                                referralTransactionId,
+
+                            points:
+                                REFERRAL_BONUS
+                        }
+                    );
+
+                if (
+                    eventInserted
+                ) {
+                    await client.query(
+                        `UPDATE web_users
+                         SET
+                            points_balance =
+                                points_balance + $1,
+                            total_referrals =
+                                total_referrals + 1
+                         WHERE id = $2`,
+                        [
+                            REFERRAL_BONUS,
+                            referrerId
+                        ]
+                    );
+                }
             }
 
-            await client.query('COMMIT');
-
-            const userPayload = newUser.rows[0];
-
-            const token = jwt.sign(
-                {
-                    userId: userPayload.id,
-                    email: userPayload.email
-                },
-                JWT_SECRET,
-                {
-                    expiresIn: '7d',
-                    issuer: 'ganarecompensasenlaweb'
-                }
+            await client.query(
+                'COMMIT'
             );
+
+            const token =
+                createUserToken(
+                    user
+                );
 
             return res.json({
                 success: true,
-                user: userPayload,
+                user,
                 token
             });
-        } catch (err) {
-            await client.query('ROLLBACK');
+        } catch (error) {
+            await safeRollback(
+                client
+            );
+
+            // Error de UNIQUE.
+            if (
+                error.code === '23505'
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        'El correo electrónico o código de referido ya existe.'
+                });
+            }
 
             console.error(
                 'Error en registro:',
-                err
+                error
             );
 
             return res.status(500).json({
                 success: false,
-                error: 'Error al registrar el usuario.'
+                error:
+                    'Error al registrar el usuario.'
             });
         } finally {
             client.release();
@@ -957,16 +1624,23 @@ app.post(
         ) {
             return res.status(400).json({
                 success: false,
-                error: 'Email y contraseña requeridos.'
+                error:
+                    'Email y contraseña requeridos.'
             });
         }
 
-        const normalizedEmail = normalizeEmail(email);
+        const normalizedEmail =
+            normalizeEmail(email);
 
-        if (!isValidEmail(normalizedEmail)) {
+        if (
+            !isValidEmail(
+                normalizedEmail
+            )
+        ) {
             return res.status(401).json({
                 success: false,
-                error: 'Credenciales incorrectas.'
+                error:
+                    'Credenciales incorrectas.'
             });
         }
 
@@ -976,40 +1650,45 @@ app.post(
         ) {
             return res.status(401).json({
                 success: false,
-                error: 'Credenciales incorrectas.'
+                error:
+                    'Credenciales incorrectas.'
             });
         }
 
         try {
-            const userRes = await db.query(
-                `SELECT
-                    id,
-                    email,
-                    password_hash,
-                    binance_id,
-                    country_code,
-                    tier_level,
-                    points_balance,
-                    daily_videos_watched,
-                    referral_code,
-                    total_referrals
-                 FROM web_users
-                 WHERE email = $1
-                 LIMIT 1`,
-                [normalizedEmail]
-            );
+            const userRes =
+                await db.query(
+                    `SELECT
+                        id,
+                        email,
+                        password_hash,
+                        binance_id,
+                        country_code,
+                        tier_level,
+                        points_balance,
+                        daily_videos_watched,
+                        referral_code,
+                        total_referrals
+                     FROM web_users
+                     WHERE email = $1
+                     LIMIT 1`,
+                    [normalizedEmail]
+                );
 
             if (
                 userRes.rows.length === 0 ||
-                !userRes.rows[0].password_hash
+                !userRes.rows[0]
+                    .password_hash
             ) {
                 return res.status(401).json({
                     success: false,
-                    error: 'Credenciales incorrectas.'
+                    error:
+                        'Credenciales incorrectas.'
                 });
             }
 
-            const user = userRes.rows[0];
+            const user =
+                userRes.rows[0];
 
             const validPassword =
                 await bcrypt.compare(
@@ -1020,38 +1699,33 @@ app.post(
             if (!validPassword) {
                 return res.status(401).json({
                     success: false,
-                    error: 'Credenciales incorrectas.'
+                    error:
+                        'Credenciales incorrectas.'
                 });
             }
 
             delete user.password_hash;
 
-            const token = jwt.sign(
-                {
-                    userId: user.id,
-                    email: user.email
-                },
-                JWT_SECRET,
-                {
-                    expiresIn: '7d',
-                    issuer: 'ganarecompensasenlaweb'
-                }
-            );
+            const token =
+                createUserToken(
+                    user
+                );
 
             return res.json({
                 success: true,
                 user,
                 token
             });
-        } catch (err) {
+        } catch (error) {
             console.error(
                 'Error en login:',
-                err
+                error
             );
 
             return res.status(500).json({
                 success: false,
-                error: 'Error al iniciar sesión.'
+                error:
+                    'Error al iniciar sesión.'
             });
         }
     }
@@ -1066,33 +1740,41 @@ app.get(
     verifyToken,
     async (req, res) => {
         try {
-            const result = await db.query(
-                `SELECT points_balance
-                 FROM web_users
-                 WHERE id = $1`,
-                [req.user.userId]
-            );
+            const result =
+                await db.query(
+                    `SELECT
+                        points_balance
+                     FROM web_users
+                     WHERE id = $1`,
+                    [req.user.userId]
+                );
 
-            if (result.rows.length === 0) {
+            if (
+                result.rows.length === 0
+            ) {
                 return res.status(404).json({
                     success: false,
-                    error: 'Usuario no encontrado.'
+                    error:
+                        'Usuario no encontrado.'
                 });
             }
 
             return res.json({
                 success: true,
-                balance: result.rows[0].points_balance
+                balance:
+                    result.rows[0]
+                        .points_balance
             });
-        } catch (err) {
+        } catch (error) {
             console.error(
                 'Error obteniendo saldo:',
-                err
+                error
             );
 
             return res.status(500).json({
                 success: false,
-                error: 'Error del servidor.'
+                error:
+                    'Error del servidor.'
             });
         }
     }
@@ -1107,12 +1789,16 @@ app.post(
     verifyToken,
     rewardRateLimit,
     async (req, res) => {
-        const userId = req.user.userId;
+        const userId =
+            req.user.userId;
 
-        const client = await db.connect();
+        const client =
+            await db.connect();
 
         try {
-            await client.query('BEGIN');
+            await client.query(
+                'BEGIN'
+            );
 
             await lockRewardOperation(
                 client,
@@ -1127,36 +1813,43 @@ app.post(
                 );
 
             if (
-                Number(usage.video_count) >=
+                Number(
+                    usage.video_count
+                ) >=
                 MAX_VIDEO_REWARDS_PER_DAY
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(429).json({
                     success: false,
                     error:
-                        `Alcanzaste el máximo de ` +
-                        `${MAX_VIDEO_REWARDS_PER_DAY} ` +
-                        `recompensas de video por día.`
+                        `Alcanzaste el máximo de ${MAX_VIDEO_REWARDS_PER_DAY} recompensas de video por día.`
                 });
             }
 
-            const recent = await client.query(
-                `SELECT claimed_at
-                 FROM reward_sessions
-                 WHERE user_id = $1
-                   AND reward_type = 'video'
-                   AND claimed_at IS NOT NULL
-                 ORDER BY claimed_at DESC
-                 LIMIT 1`,
-                [String(userId)]
-            );
+            const recent =
+                await client.query(
+                    `SELECT
+                        claimed_at
+                     FROM reward_sessions
+                     WHERE user_id = $1
+                       AND reward_type = 'video'
+                       AND claimed_at IS NOT NULL
+                     ORDER BY claimed_at DESC
+                     LIMIT 1`,
+                    [userId]
+                );
 
-            if (recent.rows.length > 0) {
+            if (
+                recent.rows.length > 0
+            ) {
                 const elapsed =
                     Date.now() -
                     new Date(
-                        recent.rows[0].claimed_at
+                        recent.rows[0]
+                            .claimed_at
                     ).getTime();
 
                 if (
@@ -1171,30 +1864,37 @@ app.post(
                             ) / 1000
                         );
 
-                    await client.query('ROLLBACK');
+                    await safeRollback(
+                        client
+                    );
 
                     return res.status(429).json({
                         success: false,
                         error:
-                            `Esperá ${remaining} segundos ` +
-                            `para otro anuncio.`
+                            `Esperá ${remaining} segundos para otro anuncio.`
                     });
                 }
             }
 
-            const active = await client.query(
-                `SELECT session_id
-                 FROM reward_sessions
-                 WHERE user_id = $1
-                   AND reward_type = 'video'
-                   AND claimed_at IS NULL
-                   AND expires_at > NOW()
-                 LIMIT 1`,
-                [String(userId)]
-            );
+            const active =
+                await client.query(
+                    `SELECT
+                        session_id
+                     FROM reward_sessions
+                     WHERE user_id = $1
+                       AND reward_type = 'video'
+                       AND claimed_at IS NULL
+                       AND expires_at > NOW()
+                     LIMIT 1`,
+                    [userId]
+                );
 
-            if (active.rows.length > 0) {
-                await client.query('ROLLBACK');
+            if (
+                active.rows.length > 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(409).json({
                     success: false,
@@ -1206,7 +1906,8 @@ app.post(
             const sessionId =
                 newRewardSessionId();
 
-            const started = new Date();
+            const started =
+                new Date();
 
             const expires =
                 new Date(
@@ -1227,27 +1928,28 @@ app.post(
                     ($1, $2, 'video', $3, $4)`,
                 [
                     sessionId,
-                    String(userId),
+                    userId,
                     started,
                     expires
                 ]
             );
 
-            await client.query('COMMIT');
+            await client.query(
+                'COMMIT'
+            );
 
             return res.json({
                 success: true,
                 sessionId,
-                waitSeconds: VIDEO_MIN_SECONDS,
-
-                // Este enlace se mantiene porque es el que
-                // actualmente utiliza tu frontend.
-                // La validación real de visualización debe
-                // implementarse mediante postback del proveedor.
-                adUrl: 'https://omg10.com/4/11528482'
+                waitSeconds:
+                    VIDEO_MIN_SECONDS,
+                adUrl:
+                    VIDEO_AD_URL
             });
         } catch (error) {
-            await client.query('ROLLBACK');
+            await safeRollback(
+                client
+            );
 
             console.error(
                 'Error iniciando recompensa de video:',
@@ -1278,11 +1980,13 @@ app.post(
             sessionId
         } = req.body || {};
 
-        const userId = req.user.userId;
+        const userId =
+            req.user.userId;
 
         if (
-            typeof sessionId !== 'string' ||
-            !/^[a-f0-9]{64}$/.test(sessionId)
+            !isValidRewardSessionId(
+                sessionId
+            )
         ) {
             return res.status(400).json({
                 success: false,
@@ -1291,10 +1995,13 @@ app.post(
             });
         }
 
-        const client = await db.connect();
+        const client =
+            await db.connect();
 
         try {
-            await client.query('BEGIN');
+            await client.query(
+                'BEGIN'
+            );
 
             await lockRewardOperation(
                 client,
@@ -1302,21 +2009,26 @@ app.post(
                 'video'
             );
 
-            const sessionRes = await client.query(
-                `SELECT *
-                 FROM reward_sessions
-                 WHERE session_id = $1
-                   AND user_id = $2
-                   AND reward_type = 'video'
-                 FOR UPDATE`,
-                [
-                    sessionId,
-                    String(userId)
-                ]
-            );
+            const sessionRes =
+                await client.query(
+                    `SELECT *
+                     FROM reward_sessions
+                     WHERE session_id = $1
+                       AND user_id = $2
+                       AND reward_type = 'video'
+                     FOR UPDATE`,
+                    [
+                        sessionId,
+                        userId
+                    ]
+                );
 
-            if (sessionRes.rows.length === 0) {
-                await client.query('ROLLBACK');
+            if (
+                sessionRes.rows.length === 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(404).json({
                     success: false,
@@ -1328,8 +2040,12 @@ app.post(
             const session =
                 sessionRes.rows[0];
 
-            if (session.claimed_at) {
-                await client.query('ROLLBACK');
+            if (
+                session.claimed_at
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(409).json({
                     success: false,
@@ -1348,25 +2064,31 @@ app.post(
                     session.expires_at
                 ).getTime();
 
-            const now = Date.now();
+            const now =
+                Date.now();
 
             if (
                 now <
                 startedMs +
                 VIDEO_MIN_SECONDS * 1000
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(400).json({
                     success: false,
                     error:
-                        `Todavía no pasaron ` +
-                        `${VIDEO_MIN_SECONDS} segundos.`
+                        `Todavía no pasaron ${VIDEO_MIN_SECONDS} segundos.`
                 });
             }
 
-            if (now > expiresMs) {
-                await client.query('ROLLBACK');
+            if (
+                now > expiresMs
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(400).json({
                     success: false,
@@ -1382,10 +2104,14 @@ app.post(
                 );
 
             if (
-                Number(usage.video_count) >=
+                Number(
+                    usage.video_count
+                ) >=
                 MAX_VIDEO_REWARDS_PER_DAY
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(429).json({
                     success: false,
@@ -1396,29 +2122,31 @@ app.post(
 
             const recentClaim =
                 await client.query(
-                    `SELECT claimed_at
+                    `SELECT
+                        claimed_at
                      FROM reward_sessions
                      WHERE user_id = $1
                        AND reward_type = 'video'
                        AND claimed_at IS NOT NULL
                      ORDER BY claimed_at DESC
                      LIMIT 1`,
-                    [String(userId)]
+                    [userId]
                 );
 
-            if (recentClaim.rows.length > 0) {
+            if (
+                recentClaim.rows.length > 0
+            ) {
                 const elapsed =
                     now -
                     new Date(
-                        recentClaim.rows[0].claimed_at
+                        recentClaim.rows[0]
+                            .claimed_at
                     ).getTime();
 
                 if (
                     elapsed <
                     VIDEO_COOLDOWN_MS
                 ) {
-                    await client.query('ROLLBACK');
-
                     const remaining =
                         Math.ceil(
                             (
@@ -1427,16 +2155,18 @@ app.post(
                             ) / 1000
                         );
 
+                    await safeRollback(
+                        client
+                    );
+
                     return res.status(429).json({
                         success: false,
                         error:
-                            `Esperá ${remaining} segundos ` +
-                            `para otra recompensa de video.`
+                            `Esperá ${remaining} segundos para otra recompensa de video.`
                     });
                 }
             }
 
-            // Incremento atómico y condicionado.
             const usageUpdate =
                 await client.query(
                     `INSERT INTO reward_daily_usage
@@ -1448,7 +2178,10 @@ app.post(
                         )
                      VALUES
                         ($1, CURRENT_DATE, 1, 0)
-                     ON CONFLICT (user_id, reward_date)
+                     ON CONFLICT (
+                        user_id,
+                        reward_date
+                     )
                      DO UPDATE SET
                         video_count =
                             reward_daily_usage.video_count + 1
@@ -1457,18 +2190,53 @@ app.post(
                         $2
                      RETURNING video_count`,
                     [
-                        String(userId),
+                        userId,
                         MAX_VIDEO_REWARDS_PER_DAY
                     ]
                 );
 
-            if (usageUpdate.rows.length === 0) {
-                await client.query('ROLLBACK');
+            if (
+                usageUpdate.rows.length === 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(429).json({
                     success: false,
                     error:
                         'Límite diario de videos alcanzado.'
+                });
+            }
+
+            const rewardTransactionId =
+                `VIDEO_${sessionId}`;
+
+            const eventInserted =
+                await insertRewardEvent(
+                    client,
+                    {
+                        userId,
+                        sourceType:
+                            'WEB_VIDEO',
+                        transId:
+                            rewardTransactionId,
+                        points:
+                            VIDEO_REWARD_POINTS
+                    }
+                );
+
+            if (
+                !eventInserted
+            ) {
+                await safeRollback(
+                    client
+                );
+
+                return res.status(409).json({
+                    success: false,
+                    error:
+                        'Esta recompensa ya fue procesada.'
                 });
             }
 
@@ -1492,27 +2260,30 @@ app.post(
                     ]
                 );
 
-            if (balanceRes.rows.length === 0) {
-                await client.query('ROLLBACK');
-
-                return res.status(404).json({
-                    success: false,
-                    error:
-                        'Usuario no encontrado.'
-                });
+            if (
+                balanceRes.rows.length === 0
+            ) {
+                throw new Error(
+                    'Usuario no encontrado al acreditar video.'
+                );
             }
 
-            await client.query('COMMIT');
+            await client.query(
+                'COMMIT'
+            );
 
             return res.json({
                 success: true,
                 pointsAwarded:
                     VIDEO_REWARD_POINTS,
                 newBalance:
-                    balanceRes.rows[0].points_balance
+                    balanceRes.rows[0]
+                        .points_balance
             });
         } catch (error) {
-            await client.query('ROLLBACK');
+            await safeRollback(
+                client
+            );
 
             console.error(
                 'Error reclamando recompensa de video:',
@@ -1539,12 +2310,16 @@ app.post(
     verifyToken,
     rewardRateLimit,
     async (req, res) => {
-        const userId = req.user.userId;
+        const userId =
+            req.user.userId;
 
-        const client = await db.connect();
+        const client =
+            await db.connect();
 
         try {
-            await client.query('BEGIN');
+            await client.query(
+                'BEGIN'
+            );
 
             await lockRewardOperation(
                 client,
@@ -1559,33 +2334,41 @@ app.post(
                 );
 
             if (
-                Number(usage.game_count) >=
+                Number(
+                    usage.game_count
+                ) >=
                 MAX_GAME_REWARDS_PER_DAY
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(429).json({
                     success: false,
                     error:
-                        `Alcanzaste el máximo de ` +
-                        `${MAX_GAME_REWARDS_PER_DAY} ` +
-                        `recompensas de juego por día.`
+                        `Alcanzaste el máximo de ${MAX_GAME_REWARDS_PER_DAY} recompensas de juego por día.`
                 });
             }
 
-            const active = await client.query(
-                `SELECT session_id
-                 FROM reward_sessions
-                 WHERE user_id = $1
-                   AND reward_type = 'game'
-                   AND claimed_at IS NULL
-                   AND expires_at > NOW()
-                 LIMIT 1`,
-                [String(userId)]
-            );
+            const active =
+                await client.query(
+                    `SELECT
+                        session_id
+                     FROM reward_sessions
+                     WHERE user_id = $1
+                       AND reward_type = 'game'
+                       AND claimed_at IS NULL
+                       AND expires_at > NOW()
+                     LIMIT 1`,
+                    [userId]
+                );
 
-            if (active.rows.length > 0) {
-                await client.query('ROLLBACK');
+            if (
+                active.rows.length > 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(409).json({
                     success: false,
@@ -1594,22 +2377,27 @@ app.post(
                 });
             }
 
-            const recent = await client.query(
-                `SELECT claimed_at
-                 FROM reward_sessions
-                 WHERE user_id = $1
-                   AND reward_type = 'game'
-                   AND claimed_at IS NOT NULL
-                 ORDER BY claimed_at DESC
-                 LIMIT 1`,
-                [String(userId)]
-            );
+            const recent =
+                await client.query(
+                    `SELECT
+                        claimed_at
+                     FROM reward_sessions
+                     WHERE user_id = $1
+                       AND reward_type = 'game'
+                       AND claimed_at IS NOT NULL
+                     ORDER BY claimed_at DESC
+                     LIMIT 1`,
+                    [userId]
+                );
 
-            if (recent.rows.length > 0) {
+            if (
+                recent.rows.length > 0
+            ) {
                 const elapsed =
                     Date.now() -
                     new Date(
-                        recent.rows[0].claimed_at
+                        recent.rows[0]
+                            .claimed_at
                     ).getTime();
 
                 if (
@@ -1624,13 +2412,14 @@ app.post(
                             ) / 1000
                         );
 
-                    await client.query('ROLLBACK');
+                    await safeRollback(
+                        client
+                    );
 
                     return res.status(429).json({
                         success: false,
                         error:
-                            `Esperá ${remaining} segundos ` +
-                            `para volver a reclamar.`
+                            `Esperá ${remaining} segundos para volver a reclamar.`
                     });
                 }
             }
@@ -1638,7 +2427,8 @@ app.post(
             const sessionId =
                 newRewardSessionId();
 
-            const started = new Date();
+            const started =
+                new Date();
 
             const expires =
                 new Date(
@@ -1659,21 +2449,26 @@ app.post(
                     ($1, $2, 'game', $3, $4)`,
                 [
                     sessionId,
-                    String(userId),
+                    userId,
                     started,
                     expires
                 ]
             );
 
-            await client.query('COMMIT');
+            await client.query(
+                'COMMIT'
+            );
 
             return res.json({
                 success: true,
                 sessionId,
-                waitSeconds: GAME_MIN_SECONDS
+                waitSeconds:
+                    GAME_MIN_SECONDS
             });
         } catch (error) {
-            await client.query('ROLLBACK');
+            await safeRollback(
+                client
+            );
 
             console.error(
                 'Error iniciando juego:',
@@ -1704,11 +2499,13 @@ app.post(
             sessionId
         } = req.body || {};
 
-        const userId = req.user.userId;
+        const userId =
+            req.user.userId;
 
         if (
-            typeof sessionId !== 'string' ||
-            !/^[a-f0-9]{64}$/.test(sessionId)
+            !isValidRewardSessionId(
+                sessionId
+            )
         ) {
             return res.status(400).json({
                 success: false,
@@ -1717,10 +2514,13 @@ app.post(
             });
         }
 
-        const client = await db.connect();
+        const client =
+            await db.connect();
 
         try {
-            await client.query('BEGIN');
+            await client.query(
+                'BEGIN'
+            );
 
             await lockRewardOperation(
                 client,
@@ -1738,12 +2538,16 @@ app.post(
                      FOR UPDATE`,
                     [
                         sessionId,
-                        String(userId)
+                        userId
                     ]
                 );
 
-            if (sessionRes.rows.length === 0) {
-                await client.query('ROLLBACK');
+            if (
+                sessionRes.rows.length === 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(404).json({
                     success: false,
@@ -1755,8 +2559,12 @@ app.post(
             const session =
                 sessionRes.rows[0];
 
-            if (session.claimed_at) {
-                await client.query('ROLLBACK');
+            if (
+                session.claimed_at
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(409).json({
                     success: false,
@@ -1765,7 +2573,8 @@ app.post(
                 });
             }
 
-            const now = Date.now();
+            const now =
+                Date.now();
 
             const startedMs =
                 new Date(
@@ -1782,18 +2591,23 @@ app.post(
                 startedMs +
                 GAME_MIN_SECONDS * 1000
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(400).json({
                     success: false,
                     error:
-                        `Todavía no pasaron ` +
-                        `${GAME_MIN_SECONDS} segundos.`
+                        `Todavía no pasaron ${GAME_MIN_SECONDS} segundos.`
                 });
             }
 
-            if (now > expiresMs) {
-                await client.query('ROLLBACK');
+            if (
+                now > expiresMs
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(400).json({
                     success: false,
@@ -1809,10 +2623,14 @@ app.post(
                 );
 
             if (
-                Number(usage.game_count) >=
+                Number(
+                    usage.game_count
+                ) >=
                 MAX_GAME_REWARDS_PER_DAY
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(429).json({
                     success: false,
@@ -1823,29 +2641,31 @@ app.post(
 
             const recentClaim =
                 await client.query(
-                    `SELECT claimed_at
+                    `SELECT
+                        claimed_at
                      FROM reward_sessions
                      WHERE user_id = $1
                        AND reward_type = 'game'
                        AND claimed_at IS NOT NULL
                      ORDER BY claimed_at DESC
                      LIMIT 1`,
-                    [String(userId)]
+                    [userId]
                 );
 
-            if (recentClaim.rows.length > 0) {
+            if (
+                recentClaim.rows.length > 0
+            ) {
                 const elapsed =
                     now -
                     new Date(
-                        recentClaim.rows[0].claimed_at
+                        recentClaim.rows[0]
+                            .claimed_at
                     ).getTime();
 
                 if (
                     elapsed <
                     GAME_COOLDOWN_MS
                 ) {
-                    await client.query('ROLLBACK');
-
                     const remaining =
                         Math.ceil(
                             (
@@ -1854,16 +2674,18 @@ app.post(
                             ) / 1000
                         );
 
+                    await safeRollback(
+                        client
+                    );
+
                     return res.status(429).json({
                         success: false,
                         error:
-                            `Esperá ${remaining} segundos ` +
-                            `para otra recompensa de juego.`
+                            `Esperá ${remaining} segundos para otra recompensa de juego.`
                     });
                 }
             }
 
-            // Incremento atómico y condicionado.
             const usageUpdate =
                 await client.query(
                     `INSERT INTO reward_daily_usage
@@ -1875,7 +2697,10 @@ app.post(
                         )
                      VALUES
                         ($1, CURRENT_DATE, 0, 1)
-                     ON CONFLICT (user_id, reward_date)
+                     ON CONFLICT (
+                        user_id,
+                        reward_date
+                     )
                      DO UPDATE SET
                         game_count =
                             reward_daily_usage.game_count + 1
@@ -1884,18 +2709,53 @@ app.post(
                         $2
                      RETURNING game_count`,
                     [
-                        String(userId),
+                        userId,
                         MAX_GAME_REWARDS_PER_DAY
                     ]
                 );
 
-            if (usageUpdate.rows.length === 0) {
-                await client.query('ROLLBACK');
+            if (
+                usageUpdate.rows.length === 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(429).json({
                     success: false,
                     error:
                         'Límite diario de juegos alcanzado.'
+                });
+            }
+
+            const rewardTransactionId =
+                `GAME_${sessionId}`;
+
+            const eventInserted =
+                await insertRewardEvent(
+                    client,
+                    {
+                        userId,
+                        sourceType:
+                            'WEB_GAME',
+                        transId:
+                            rewardTransactionId,
+                        points:
+                            GAME_REWARD_POINTS
+                    }
+                );
+
+            if (
+                !eventInserted
+            ) {
+                await safeRollback(
+                    client
+                );
+
+                return res.status(409).json({
+                    success: false,
+                    error:
+                        'Esta recompensa ya fue procesada.'
                 });
             }
 
@@ -1919,27 +2779,30 @@ app.post(
                     ]
                 );
 
-            if (balanceRes.rows.length === 0) {
-                await client.query('ROLLBACK');
-
-                return res.status(404).json({
-                    success: false,
-                    error:
-                        'Usuario no encontrado.'
-                });
+            if (
+                balanceRes.rows.length === 0
+            ) {
+                throw new Error(
+                    'Usuario no encontrado al acreditar juego.'
+                );
             }
 
-            await client.query('COMMIT');
+            await client.query(
+                'COMMIT'
+            );
 
             return res.json({
                 success: true,
                 pointsAwarded:
                     GAME_REWARD_POINTS,
                 newBalance:
-                    balanceRes.rows[0].points_balance
+                    balanceRes.rows[0]
+                        .points_balance
             });
         } catch (error) {
-            await client.query('ROLLBACK');
+            await safeRollback(
+                client
+            );
 
             console.error(
                 'Error reclamando recompensa de juego:',
@@ -1979,7 +2842,9 @@ app.get(
                     [userId]
                 );
 
-            if (userRes.rows.length === 0) {
+            if (
+                userRes.rows.length === 0
+            ) {
                 return res.status(404).json({
                     success: false,
                     error:
@@ -1987,10 +2852,8 @@ app.get(
                 });
             }
 
-            const {
-                referral_code,
-                total_referrals
-            } = userRes.rows[0];
+            const user =
+                userRes.rows[0];
 
             const referralsRes =
                 await db.query(
@@ -2004,48 +2867,71 @@ app.get(
                 );
 
             const referrals =
-                referralsRes.rows.map(ref => {
-                    const parts =
-                        String(ref.email).split('@');
+                referralsRes.rows.map(
+                    ref => {
+                        const parts =
+                            String(
+                                ref.email
+                            ).split('@');
 
-                    const name =
-                        parts[0] || '';
+                        const name =
+                            parts[0] || '';
 
-                    const domain =
-                        parts[1] || '';
+                        const domain =
+                            parts[1] || '';
 
-                    const maskedName =
-                        name.length > 2
-                            ? `${name[0]}***${name[name.length - 1]}`
-                            : `${name[0] || '*'}*`;
+                        let maskedName;
 
-                    return {
-                        email:
-                            `${maskedName}@${domain}`,
-                        created_at:
-                            ref.created_at,
-                        points_earned:
-                            REFERRAL_BONUS
-                    };
-                });
+                        if (
+                            name.length > 2
+                        ) {
+                            maskedName =
+                                `${name[0]}***${name[name.length - 1]}`;
+                        } else {
+                            maskedName =
+                                `${name[0] || '*'}*`;
+                        }
+
+                        return {
+                            email:
+                                `${maskedName}@${domain}`,
+
+                            created_at:
+                                ref.created_at,
+
+                            points_earned:
+                                REFERRAL_BONUS
+                        };
+                    }
+                );
+
+            const totalReferrals =
+                Number(
+                    user.total_referrals
+                ) || 0;
 
             return res.json({
                 success: true,
-                referral_code,
+
+                referral_code:
+                    user.referral_code,
+
                 total_referrals:
-                    Number(total_referrals) || 0,
+                    totalReferrals,
+
                 total_points_earned:
-                    (
-                        Number(total_referrals) || 0
-                    ) * REFERRAL_BONUS,
+                    totalReferrals *
+                    REFERRAL_BONUS,
+
                 bonus_per_referral:
                     REFERRAL_BONUS,
+
                 referrals
             });
-        } catch (err) {
+        } catch (error) {
             console.error(
                 'Error al obtener referidos:',
-                err
+                error
             );
 
             return res.status(500).json({
@@ -2114,8 +3000,17 @@ app.post(
             });
         }
 
-        // El campo de BD es NUMERIC(10,2).
-        // Exigimos máximo dos decimales.
+        if (
+            withdrawAmount >
+            99999999.99
+        ) {
+            return res.status(400).json({
+                success: false,
+                error:
+                    'Monto de retiro demasiado alto.'
+            });
+        }
+
         if (
             Math.abs(
                 Number(amount) -
@@ -2144,7 +3039,9 @@ app.post(
         }
 
         const methodConfig =
-            PAYOUT_CONFIG[methodKey];
+            PAYOUT_CONFIG[
+                methodKey
+            ];
 
         if (
             withdrawAmount <
@@ -2153,8 +3050,7 @@ app.post(
             return res.status(400).json({
                 success: false,
                 error:
-                    `El monto mínimo de retiro es ` +
-                    `$${methodConfig.minAmount.toFixed(2)} USD.`
+                    `El monto mínimo de retiro es $${methodConfig.minAmount.toFixed(2)} USD.`
             });
         }
 
@@ -2168,7 +3064,8 @@ app.post(
         const finalAmountToSend =
             Math.max(
                 0,
-                withdrawAmount - userFee
+                withdrawAmount -
+                userFee
             );
 
         const pointsToDeduct =
@@ -2191,7 +3088,9 @@ app.post(
             await db.connect();
 
         try {
-            await client.query('BEGIN');
+            await client.query(
+                'BEGIN'
+            );
 
             const userResult =
                 await client.query(
@@ -2203,8 +3102,12 @@ app.post(
                     [userId]
                 );
 
-            if (userResult.rows.length === 0) {
-                await client.query('ROLLBACK');
+            if (
+                userResult.rows.length === 0
+            ) {
+                await safeRollback(
+                    client
+                );
 
                 return res.status(404).json({
                     success: false,
@@ -2219,15 +3122,13 @@ app.post(
                         .points_balance
                 ) || 0;
 
-            const availableBalanceUSD =
-                totalPoints *
-                POINT_TO_CURRENCY_RATIO;
-
             if (
-                withdrawAmount >
-                availableBalanceUSD
+                totalPoints <
+                pointsToDeduct
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(400).json({
                     success: false,
@@ -2236,29 +3137,23 @@ app.post(
                 });
             }
 
-            // Guardamos el método normalizado y el importe neto
-            // en el mismo campo utilizado actualmente por tu admin.
             const payoutDescription =
                 `${methodKey} ` +
-                `(Neto: $${finalAmountToSend.toFixed(2)} USD ` +
-                `- Fee: $${userFee.toFixed(2)})`;
+                `(Neto: $${finalAmountToSend.toFixed(2)} USD - Fee: $${userFee.toFixed(2)})`;
 
-            const insertQuery = `
-                INSERT INTO withdrawal_requests
-                    (
-                        user_id,
-                        amount,
-                        payout_method,
-                        account_details
-                    )
-                VALUES
-                    ($1, $2, $3, $4)
-                RETURNING *;
-            `;
-
-            const newWithdrawal =
+            const withdrawal =
                 await client.query(
-                    insertQuery,
+                    `INSERT INTO withdrawal_requests
+                        (
+                            user_id,
+                            amount,
+                            payout_method,
+                            account_details,
+                            status
+                        )
+                     VALUES
+                        ($1, $2, $3, $4, 'pending')
+                     RETURNING *`,
                     [
                         userId,
                         withdrawAmount,
@@ -2267,7 +3162,6 @@ app.post(
                     ]
                 );
 
-            // Descuento dentro de la misma transacción.
             const balanceUpdate =
                 await client.query(
                     `UPDATE web_users
@@ -2285,32 +3179,57 @@ app.post(
             if (
                 balanceUpdate.rows.length === 0
             ) {
-                await client.query('ROLLBACK');
-
-                return res.status(400).json({
-                    success: false,
-                    error:
-                        'El saldo cambió antes de completar el retiro.'
-                });
+                throw new Error(
+                    'El saldo cambió antes de completar el retiro.'
+                );
             }
 
-            await client.query('COMMIT');
+            const withdrawalId =
+                withdrawal.rows[0].id;
+
+            await insertRewardEvent(
+                client,
+                {
+                    userId,
+
+                    sourceType:
+                        'WITHDRAWAL',
+
+                    transId:
+                        `WITHDRAWAL_${withdrawalId}`,
+
+                    points:
+                        -pointsToDeduct
+                }
+            );
+
+            await client.query(
+                'COMMIT'
+            );
 
             return res.status(201).json({
                 success: true,
+
                 message:
                     'Solicitud de retiro registrada con éxito.',
+
                 withdrawal:
-                    newWithdrawal.rows[0],
+                    withdrawal.rows[0],
+
                 fee_applied:
                     userFee.toFixed(2),
+
                 net_amount:
                     finalAmountToSend.toFixed(2),
+
                 newBalance:
-                    balanceUpdate.rows[0].points_balance
+                    balanceUpdate.rows[0]
+                        .points_balance
             });
         } catch (error) {
-            await client.query('ROLLBACK');
+            await safeRollback(
+                client
+            );
 
             console.error(
                 'Error al procesar retiro:',
@@ -2407,10 +3326,10 @@ app.get(
                 user:
                     userRes.rows[0]
             });
-        } catch (err) {
+        } catch (error) {
             console.error(
                 'Error obteniendo perfil:',
-                err
+                error
             );
 
             return res.status(500).json({
@@ -2431,20 +3350,18 @@ app.get(
     verifyAdmin,
     async (req, res) => {
         try {
-            const query = `
-                SELECT
-                    w.*,
-                    u.email,
-                    u.binance_id
-                FROM withdrawal_requests w
-                LEFT JOIN web_users u
-                    ON w.user_id = u.id
-                WHERE w.status = 'pending'
-                ORDER BY w.created_at DESC
-            `;
-
             const result =
-                await db.query(query);
+                await db.query(
+                    `SELECT
+                        w.*,
+                        u.email,
+                        u.binance_id
+                     FROM withdrawal_requests w
+                     LEFT JOIN web_users u
+                        ON w.user_id = u.id
+                     WHERE w.status = 'pending'
+                     ORDER BY w.created_at DESC`
+                );
 
             return res.json({
                 success: true,
@@ -2484,8 +3401,7 @@ app.patch(
 
         if (
             typeof id !== 'string' ||
-            id.length < 10 ||
-            id.length > 100
+            !isValidUUID(id)
         ) {
             return res.status(400).json({
                 success: false,
@@ -2495,8 +3411,10 @@ app.patch(
         }
 
         if (
-            !['completed', 'rejected']
-                .includes(status)
+            ![
+                'completed',
+                'rejected'
+            ].includes(status)
         ) {
             return res.status(400).json({
                 success: false,
@@ -2509,7 +3427,9 @@ app.patch(
             await db.connect();
 
         try {
-            await client.query('BEGIN');
+            await client.query(
+                'BEGIN'
+            );
 
             const checkResult =
                 await client.query(
@@ -2523,7 +3443,9 @@ app.patch(
             if (
                 checkResult.rows.length === 0
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(404).json({
                     success: false,
@@ -2539,13 +3461,14 @@ app.patch(
                 withdrawal.status !==
                 'pending'
             ) {
-                await client.query('ROLLBACK');
+                await safeRollback(
+                    client
+                );
 
                 return res.status(400).json({
                     success: false,
                     error:
-                        `La solicitud ya fue procesada como: ` +
-                        `${withdrawal.status}`
+                        `La solicitud ya fue procesada como: ${withdrawal.status}`
                 });
             }
 
@@ -2561,36 +3484,75 @@ app.patch(
                     ]
                 );
 
-            if (status === 'rejected') {
+            // Si se rechaza, devolver exactamente
+            // los puntos retirados.
+            if (
+                status === 'rejected'
+            ) {
                 const pointsToRefund =
                     Math.round(
-                        Number(withdrawal.amount) /
+                        Number(
+                            withdrawal.amount
+                        ) /
                         POINT_TO_CURRENCY_RATIO
                     );
 
-                await client.query(
-                    `UPDATE web_users
-                     SET points_balance =
-                         points_balance + $1
-                     WHERE id = $2`,
-                    [
-                        pointsToRefund,
-                        withdrawal.user_id
-                    ]
+                const balanceUpdate =
+                    await client.query(
+                        `UPDATE web_users
+                         SET points_balance =
+                             points_balance + $1
+                         WHERE id = $2
+                         RETURNING id`,
+                        [
+                            pointsToRefund,
+                            withdrawal.user_id
+                        ]
+                    );
+
+                if (
+                    balanceUpdate.rows.length === 0
+                ) {
+                    throw new Error(
+                        'No se pudo devolver el saldo al usuario.'
+                    );
+                }
+
+                await insertRewardEvent(
+                    client,
+                    {
+                        userId:
+                            withdrawal.user_id,
+
+                        sourceType:
+                            'WITHDRAWAL_REFUND',
+
+                        transId:
+                            `WITHDRAWAL_REFUND_${id}`,
+
+                        points:
+                            pointsToRefund
+                    }
                 );
             }
 
-            await client.query('COMMIT');
+            await client.query(
+                'COMMIT'
+            );
 
             return res.json({
                 success: true,
+
                 message:
                     `Solicitud #${id} marcada como ${status}.`,
+
                 withdrawal:
                     result.rows[0]
             });
         } catch (error) {
-            await client.query('ROLLBACK');
+            await safeRollback(
+                client
+            );
 
             console.error(
                 'Error actualizando retiro:',
@@ -2612,41 +3574,46 @@ app.patch(
 // 404
 // ============================================================
 
-app.use((req, res) => {
-    res.status(404).json({
-        success: false,
-        error: 'Ruta no encontrada.'
-    });
-});
+app.use(
+    (req, res) => {
+        res.status(404).json({
+            success: false,
+            error:
+                'Ruta no encontrada.'
+        });
+    }
+);
 
 // ============================================================
 // MANEJO GLOBAL DE ERRORES
 // ============================================================
 
-app.use((err, req, res, next) => {
-    console.error(
-        'Error no controlado:',
-        err
-    );
+app.use(
+    (err, req, res, next) => {
+        console.error(
+            'Error no controlado:',
+            err
+        );
 
-    if (
-        err &&
-        err.message ===
-        'Origen no permitido por CORS.'
-    ) {
-        return res.status(403).json({
+        if (
+            err &&
+            err.message ===
+                'Origen no permitido por CORS.'
+        ) {
+            return res.status(403).json({
+                success: false,
+                error:
+                    'Origen no permitido.'
+            });
+        }
+
+        return res.status(500).json({
             success: false,
             error:
-                'Origen no permitido.'
+                'Error interno del servidor.'
         });
     }
-
-    return res.status(500).json({
-        success: false,
-        error:
-            'Error interno del servidor.'
-    });
-});
+);
 
 // ============================================================
 // INICIALIZACIÓN
@@ -2654,24 +3621,71 @@ app.use((err, req, res, next) => {
 
 async function startServer() {
     try {
-        await db.query('SELECT 1');
+        await db.query(
+            'SELECT 1'
+        );
 
         await ensureRewardTables();
 
-        app.listen(PORT, () => {
-            console.log(
-                `Servidor iniciado correctamente en puerto ${PORT}.`
+        const server =
+            app.listen(
+                PORT,
+                () => {
+                    console.log(
+                        `Servidor iniciado correctamente en puerto ${PORT}.`
+                    );
+
+                    console.log(
+                        `CORS permitido: ${allowedOrigins.join(', ')}`
+                    );
+                }
             );
-        });
+
+        server.on(
+            'error',
+            error => {
+                console.error(
+                    'Error iniciando servidor:',
+                    error
+                );
+
+                process.exit(1);
+            }
+        );
     } catch (error) {
         console.error(
             'No se pudo inicializar el servidor:',
             error
         );
 
+        await db.end()
+            .catch(() => {});
+
         process.exit(1);
     }
 }
+
+process.on(
+    'unhandledRejection',
+    error => {
+        console.error(
+            'Unhandled Promise Rejection:',
+            error
+        );
+    }
+);
+
+process.on(
+    'uncaughtException',
+    error => {
+        console.error(
+            'Uncaught Exception:',
+            error
+        );
+
+        process.exit(1);
+    }
+);
 
 startServer();
 ```
