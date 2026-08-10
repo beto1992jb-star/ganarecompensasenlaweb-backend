@@ -21,7 +21,9 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const CPX_HASH_SECRET = process.env.CPX_HASH_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
+
+// Si no está configurado en .env, usa los orígenes por defecto para producción y desarrollo local
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://ganarecompensasenlaweb.netlify.app,http://localhost:5500';
 
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 
@@ -48,10 +50,6 @@ if (!DATABASE_URL) {
 
 if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) {
     throw new Error('CPX_HASH_SECRET es obligatorio y debe tener al menos 16 caracteres.');
-}
-
-if (!ALLOWED_ORIGIN) {
-    throw new Error('ALLOWED_ORIGIN es obligatorio.');
 }
 
 // ============================================================
@@ -112,21 +110,34 @@ app.use((req, res, next) => {
 // CORS (MÚLTIPLES ORIGENES ACCESIBLES)
 // ============================================================
 
-const allowedOrigins = ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
+const allowedOrigins = [
+    'https://ganarecompensasenlaweb.netlify.app',
+    'http://localhost:5500',
+    'http://127.0.0.1:5500',
+    ...ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
+];
 
 const corsOptions = {
     origin(origin, callback) {
+        // Permite solicitudes sin origen (por ejemplo, llamadas de aplicaciones móviles o curl/postman)
         if (!origin) return callback(null, true);
-        if (allowedOrigins.includes(origin)) return callback(null, true);
-        return callback(new Error('Origen no permitido por CORS.'));
+        
+        // Verifica si el origen entrante está dentro de la lista permitida
+        if (allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        
+        // Retorna false limpiamente sin lanzar un "new Error()" para no provocar HTTP 500
+        return callback(null, false);
     },
-    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With', 'x-admin-secret'],
-    credentials: false,
+    credentials: true,
     optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Manejo explícito de peticiones preflight OPTIONS
 
 // ============================================================
 // RATE LIMITER
