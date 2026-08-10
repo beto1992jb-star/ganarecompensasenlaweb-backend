@@ -4,7 +4,6 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const crypto = require('crypto');
-const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
@@ -25,14 +24,9 @@ if (!DATABASE_URL) throw new Error('DATABASE_URL es obligatorio.');
 if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) throw new Error('CPX_HASH_SECRET es obligatorio.');
 if (!ALLOWED_ORIGIN) throw new Error('ALLOWED_ORIGIN es obligatorio.');
 
-const POINT_TO_CURRENCY_RATIO = 0.001; 
 const GAME_REWARD_POINTS = 1;
-const DEFAULT_VIDEO_FALLBACK_POINTS = 10; 
-const REFERRAL_BONUS = 25;
-
-// TIEMPO DE ESPERA CONFIGURADO A 60 SEGUNDOS
-const GAME_MIN_SECONDS = 60; 
-const REWARD_SESSION_MAX_AGE_MS = 15 * 60 * 1000;
+const GAME_MIN_SECONDS = 60; // 60 segundos de espera obligatoria
+const REWARD_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutos de tolerancia
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -129,7 +123,8 @@ app.post('/api/v1/game/start', verifyToken, async (req, res) => {
         return res.json({ success: true, sessionId, adUrl: MONETAG_SDK_URL });
     } catch (e) {
         await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'Error al iniciar juego.' });
+        console.error("Error en /game/start:", e);
+        return res.status(500).json({ success: false, error: 'Error al iniciar sesión de juego.' });
     } finally {
         client.release();
     }
@@ -140,12 +135,11 @@ app.post('/api/v1/game/claim', verifyToken, async (req, res) => {
     const userId = req.user.userId;
 
     if (!isValidRewardSessionId(sessionId)) {
-        return res.status(400).json({ success: false, error: 'Sesión inválida.' });
+        return res.status(400).json({ success: false, error: 'Sesión inválida o malformada.' });
     }
 
-    // VALIDACIÓN DE MONETAG: Si la visualización del anuncio no fue confirmada
     if (!adWatched) {
-        return res.status(400).json({ success: false, error: 'No se verificó la interacción con el anuncio de Monetag.' });
+        return res.status(400).json({ success: false, error: 'Debes completar la interacción con el anuncio para monetizar.' });
     }
 
     const client = await db.connect();
@@ -155,19 +149,21 @@ app.post('/api/v1/game/claim', verifyToken, async (req, res) => {
 
         if (sRes.rows.length === 0) {
             await safeRollback(client);
-            return res.status(404).json({ success: false, error: 'Sesión no encontrada.' });
+            return res.status(404).json({ success: false, error: 'La sesión de juego no existe o expiró.' });
         }
 
         const session = sRes.rows[0];
         if (session.claimed_at) {
             await safeRollback(client);
-            return res.status(409).json({ success: false, error: 'Ya has reclamado estos puntos.' });
+            return res.status(409).json({ success: false, error: 'Ya has reclamado esta recompensa.' });
         }
 
         const now = Date.now();
-        if (now < new Date(session.started_at).getTime() + GAME_MIN_SECONDS * 1000) {
+        const elapsedSeconds = Math.floor((now - new Date(session.started_at).getTime()) / 1000);
+
+        if (elapsedSeconds < GAME_MIN_SECONDS) {
             await safeRollback(client);
-            return res.status(400).json({ success: false, error: `Debes interactuar al menos ${GAME_MIN_SECONDS} segundos.` });
+            return res.status(400).json({ success: false, error: `Debes jugar al menos ${GAME_MIN_SECONDS} segundos. Llevas ${elapsedSeconds}s.` });
         }
 
         await client.query('UPDATE reward_sessions SET claimed_at = NOW(), points_awarded = $1 WHERE session_id = $2', [GAME_REWARD_POINTS, sessionId]);
@@ -181,7 +177,8 @@ app.post('/api/v1/game/claim', verifyToken, async (req, res) => {
         });
     } catch (e) {
         await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'Error al procesar reclamo.' });
+        console.error("Error en /game/claim:", e);
+        return res.status(500).json({ success: false, error: 'Error interno al procesar el reclamo.' });
     } finally {
         client.release();
     }
