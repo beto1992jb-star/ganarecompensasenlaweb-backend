@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const bcrypt = require('bcryptjs'); // Librería para hashing de contraseñas
+const bcrypt = require('bcryptjs');
 
 const app = express();
 
@@ -26,8 +26,8 @@ if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) throw new Error('CPX_HASH_S
 if (!ALLOWED_ORIGIN) throw new Error('ALLOWED_ORIGIN es obligatorio.');
 
 const GAME_REWARD_POINTS = 1;
-const GAME_MIN_SECONDS = 60; // 60 segundos de espera obligatoria
-const REWARD_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutos de tolerancia
+const GAME_MIN_SECONDS = 60;
+const REWARD_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -42,7 +42,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// Configuración de CORS dinámica desde variable de entorno
 const allowedOrigins = ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
     origin(origin, callback) {
@@ -94,6 +93,26 @@ async function ensureRewardTables() {
     `);
 }
 
+// Creador automático de usuario de prueba si la BD está vacía
+async function seedDefaultUser() {
+    const testEmail = 'admin@ejemplo.com';
+    const testPassword = 'Password123!';
+
+    try {
+        const userRes = await db.query('SELECT id FROM web_users WHERE email = $1', [testEmail]);
+        if (userRes.rows.length === 0) {
+            const hashedPassword = await bcrypt.hash(testPassword, 10);
+            await db.query(
+                `INSERT INTO web_users (email, password_hash) VALUES ($1, $2)`,
+                [testEmail, hashedPassword]
+            );
+            console.log(`Usuario por defecto verificado/creado: ${testEmail}`);
+        }
+    } catch (e) {
+        console.error('Error al poblar usuario por defecto:', e.message);
+    }
+}
+
 const verifyToken = (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ success: false, error: 'Token no provisto.' });
@@ -107,10 +126,9 @@ const verifyToken = (req, res, next) => {
 };
 
 // ==========================================
-// ENDPOINTS DE AUTENTICACIÓN (LOGIN & REGISTER)
+// AUTENTICACIÓN
 // ==========================================
 
-// POST /api/v1/auth/register (Opcional pero recomendado para crear usuarios)
 app.post('/api/v1/auth/register', async (req, res) => {
     const { email, password } = req.body || {};
 
@@ -145,7 +163,7 @@ app.post('/api/v1/auth/register', async (req, res) => {
             user: { id: user.id, email: user.email, pointsBalance: user.points_balance }
         });
     } catch (e) {
-        if (e.code === '23505') { // Código de violación de restricción única (UNIQUE) en PostgreSQL
+        if (e.code === '23505') {
             return res.status(409).json({ success: false, message: 'El correo electrónico ya está registrado.' });
         }
         console.error('Error en /auth/register:', e);
@@ -153,7 +171,6 @@ app.post('/api/v1/auth/register', async (req, res) => {
     }
 });
 
-// POST /api/v1/auth/login
 app.post('/api/v1/auth/login', async (req, res) => {
     const { email, password } = req.body || {};
 
@@ -164,7 +181,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
     try {
         const normalizedEmail = email.toLowerCase().trim();
 
-        // Buscar usuario en PostgreSQL
+        // Consulta SQL limpia contra web_users
         const userRes = await db.query('SELECT * FROM web_users WHERE email = $1', [normalizedEmail]);
 
         if (userRes.rows.length === 0) {
@@ -172,14 +189,12 @@ app.post('/api/v1/auth/login', async (req, res) => {
         }
 
         const user = userRes.rows[0];
-
-        // Comparar la contraseña ingresada con el hash encriptado
         const isMatch = await bcrypt.compare(password, user.password_hash);
+        
         if (!isMatch) {
             return res.status(401).json({ success: false, message: 'Credenciales inválidas.' });
         }
 
-        // Generar Token JWT
         const token = jwt.sign(
             { userId: user.id, email: user.email },
             JWT_SECRET,
@@ -203,7 +218,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
 });
 
 // ==========================================
-// ENDPOINTS JUEGOS
+// JUEGOS Y RECOMPENSAS
 // ==========================================
 
 app.post('/api/v1/game/start', verifyToken, async (req, res) => {
@@ -294,6 +309,7 @@ app.get('*', (req, res) => {
 
 async function startServer() {
     await ensureRewardTables();
+    await seedDefaultUser();
     app.listen(PORT, () => console.log(`Servidor activo en puerto ${PORT}`));
 }
 startServer();
