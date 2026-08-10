@@ -26,8 +26,8 @@ if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) throw new Error('CPX_HASH_S
 if (!ALLOWED_ORIGIN) throw new Error('ALLOWED_ORIGIN es obligatorio.');
 
 const GAME_REWARD_POINTS = 1;
-const GAME_MIN_SECONDS = 60;
-const REWARD_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+const GAME_MIN_SECONDS = 60; // 60 segundos de espera obligatoria
+const REWARD_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutos de tolerancia
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -42,6 +42,7 @@ app.use((req, res, next) => {
     next();
 });
 
+// Configuración de CORS dinámica desde variable de entorno
 const allowedOrigins = ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
     origin(origin, callback) {
@@ -65,35 +66,39 @@ function newRewardSessionId() { return crypto.randomBytes(32).toString('hex'); }
 function isValidRewardSessionId(val) { return typeof val === 'string' && /^[a-f0-9]{64}$/.test(val); }
 function safeRollback(client) { return client.query('ROLLBACK').catch(() => {}); }
 
+// Creación e inicialización de tablas respetando el esquema SQL provisto
 async function ensureRewardTables() {
     await db.query(`
+        CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
         CREATE TABLE IF NOT EXISTS web_users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            country_code TEXT DEFAULT 'AR',
-            tier_level INTEGER DEFAULT 1,
-            points_balance INTEGER DEFAULT 0,
-            referral_code TEXT UNIQUE,
-            referred_by UUID REFERENCES web_users(id),
-            total_referrals INTEGER DEFAULT 0,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255),
+            binance_id VARCHAR(64),
+            country_code VARCHAR(2) NOT NULL DEFAULT 'AR',
+            tier_level INT NOT NULL DEFAULT 2,
+            points_balance INT NOT NULL DEFAULT 0 CHECK (points_balance >= 0),
+            daily_videos_watched INT NOT NULL DEFAULT 0,
+            last_video_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            referral_code VARCHAR(20) UNIQUE,
+            referred_by UUID REFERENCES web_users(id) ON DELETE SET NULL,
+            total_referrals INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS reward_sessions (
             session_id TEXT PRIMARY KEY,
-            user_id UUID NOT NULL,
+            user_id UUID NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,
             reward_type TEXT NOT NULL CHECK (reward_type IN ('video', 'game')),
             started_at TIMESTAMPTZ NOT NULL,
             expires_at TIMESTAMPTZ NOT NULL,
-            confirmed_at TIMESTAMPTZ NULL,
-            claimed_at TIMESTAMPTZ NULL,
-            points_awarded INTEGER DEFAULT 0
+            claimed_at TIMESTAMPTZ NULL
         );
     `);
 }
 
-// Creador automático de usuario de prueba si la BD está vacía
+// Semilla automática para crear usuario de pruebas si la base está vacía
 async function seedDefaultUser() {
     const testEmail = 'admin@ejemplo.com';
     const testPassword = 'Password123!';
@@ -126,7 +131,7 @@ const verifyToken = (req, res, next) => {
 };
 
 // ==========================================
-// AUTENTICACIÓN
+// ENDPOINTS DE AUTENTICACIÓN
 // ==========================================
 
 app.post('/api/v1/auth/register', async (req, res) => {
@@ -181,7 +186,6 @@ app.post('/api/v1/auth/login', async (req, res) => {
     try {
         const normalizedEmail = email.toLowerCase().trim();
 
-        // Consulta SQL limpia contra web_users
         const userRes = await db.query('SELECT * FROM web_users WHERE email = $1', [normalizedEmail]);
 
         if (userRes.rows.length === 0) {
@@ -189,8 +193,8 @@ app.post('/api/v1/auth/login', async (req, res) => {
         }
 
         const user = userRes.rows[0];
+
         const isMatch = await bcrypt.compare(password, user.password_hash);
-        
         if (!isMatch) {
             return res.status(401).json({ success: false, message: 'Credenciales inválidas.' });
         }
@@ -218,7 +222,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
 });
 
 // ==========================================
-// JUEGOS Y RECOMPENSAS
+// ENDPOINTS DE JUEGOS Y RECOMPENSAS
 // ==========================================
 
 app.post('/api/v1/game/start', verifyToken, async (req, res) => {
@@ -283,7 +287,7 @@ app.post('/api/v1/game/claim', verifyToken, async (req, res) => {
             return res.status(400).json({ success: false, error: `Debes jugar al menos ${GAME_MIN_SECONDS} segundos. Llevas ${elapsedSeconds}s.` });
         }
 
-        await client.query('UPDATE reward_sessions SET claimed_at = NOW(), points_awarded = $1 WHERE session_id = $2', [GAME_REWARD_POINTS, sessionId]);
+        await client.query('UPDATE reward_sessions SET claimed_at = NOW() WHERE session_id = $1', [sessionId]);
         const balRes = await client.query('UPDATE web_users SET points_balance = points_balance + $1 WHERE id = $2 RETURNING points_balance', [GAME_REWARD_POINTS, userId]);
 
         await client.query('COMMIT');
