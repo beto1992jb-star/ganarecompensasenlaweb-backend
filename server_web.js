@@ -55,7 +55,7 @@ if (!ALLOWED_ORIGIN) {
 }
 
 // ============================================================
-// CONFIGURACIÓN DE NEGOCIO
+// CONFIGURACIÓN DE NEGOCIO (TIEMPOS A 45s Y SIN LÍMITES)
 // ============================================================
 
 const POINT_TO_CURRENCY_RATIO = 0.001; // 1000 puntos = 1 USD
@@ -63,14 +63,17 @@ const POINT_TO_CURRENCY_RATIO = 0.001; // 1000 puntos = 1 USD
 const GAME_REWARD_POINTS = 1;
 const REFERRAL_BONUS = 25;
 
-const MAX_VIDEO_REWARDS_PER_DAY = 5;
-const MAX_GAME_REWARDS_PER_DAY = 20;
+// Sin límite diario (ilimitado)
+const MAX_VIDEO_REWARDS_PER_DAY = Infinity;
+const MAX_GAME_REWARDS_PER_DAY = Infinity;
 
-const VIDEO_COOLDOWN_MS = 10 * 60 * 1000;
-const GAME_COOLDOWN_MS = 60 * 1000;
+// Cooldown de 45 segundos para ambos
+const VIDEO_COOLDOWN_MS = 45 * 1000;
+const GAME_COOLDOWN_MS = 45 * 1000;
 
+// Tiempos mínimos de visualización/juego en 45 segundos
 const VIDEO_MIN_SECONDS = 45;
-const GAME_MIN_SECONDS = 60;
+const GAME_MIN_SECONDS = 45;
 
 const REWARD_SESSION_MAX_AGE_MS = 15 * 60 * 1000;
 
@@ -173,7 +176,7 @@ setInterval(() => {
 }, 10 * 60 * 1000).unref();
 
 const authRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 15, keyPrefix: 'auth', message: 'Demasiados intentos. Esperá unos minutos.' });
-const rewardRateLimit = rateLimit({ windowMs: 60 * 1000, max: 30, keyPrefix: 'reward' });
+const rewardRateLimit = rateLimit({ windowMs: 60 * 1000, max: 60, keyPrefix: 'reward' });
 const withdrawRateLimit = rateLimit({ windowMs: 10 * 60 * 1000, max: 10, keyPrefix: 'withdraw' });
 const cpxRateLimit = rateLimit({ windowMs: 60 * 1000, max: 30, keyPrefix: 'cpx' });
 
@@ -729,13 +732,15 @@ app.post('/api/v1/web-video/start', verifyToken, rewardRateLimit, async (req, re
         await client.query('BEGIN');
         await lockRewardOperation(client, userId, 'video');
 
-        const usage = await getDailyUsage(client, userId);
-        if (Number(usage.video_count) >= MAX_VIDEO_REWARDS_PER_DAY) {
-            await safeRollback(client);
-            return res.status(429).json({
-                success: false,
-                error: `Alcanzaste el máximo de ${MAX_VIDEO_REWARDS_PER_DAY} recompensas de video por día.`
-            });
+        if (Number.isFinite(MAX_VIDEO_REWARDS_PER_DAY)) {
+            const usage = await getDailyUsage(client, userId);
+            if (Number(usage.video_count) >= MAX_VIDEO_REWARDS_PER_DAY) {
+                await safeRollback(client);
+                return res.status(429).json({
+                    success: false,
+                    error: `Alcanzaste el máximo de ${MAX_VIDEO_REWARDS_PER_DAY} recompensas de video por día.`
+                });
+            }
         }
 
         const recent = await client.query(
@@ -846,19 +851,13 @@ app.post('/api/v1/web-video/claim', verifyToken, rewardRateLimit, async (req, re
 
         const realPoints = Number(session.points_awarded) > 0 ? Number(session.points_awarded) : 10;
 
-        const usageUpdate = await client.query(
+        await client.query(
             `INSERT INTO reward_daily_usage (user_id, reward_date, video_count, game_count)
              VALUES ($1, CURRENT_DATE, 1, 0)
              ON CONFLICT (user_id, reward_date)
-             DO UPDATE SET video_count = reward_daily_usage.video_count + 1
-             WHERE reward_daily_usage.video_count < $2 RETURNING video_count`,
-            [userId, MAX_VIDEO_REWARDS_PER_DAY]
+             DO UPDATE SET video_count = reward_daily_usage.video_count + 1`,
+            [userId]
         );
-
-        if (usageUpdate.rows.length === 0) {
-            await safeRollback(client);
-            return res.status(429).json({ success: false, error: 'Límite diario de videos alcanzado.' });
-        }
 
         const transId = `VIDEO_${sessionId}`;
         const eventInserted = await insertRewardEvent(client, { userId, sourceType: 'WEB_VIDEO', transId, points: realPoints });
@@ -901,13 +900,15 @@ app.post('/api/v1/game/start', verifyToken, rewardRateLimit, async (req, res) =>
         await client.query('BEGIN');
         await lockRewardOperation(client, userId, 'game');
 
-        const usage = await getDailyUsage(client, userId);
-        if (Number(usage.game_count) >= MAX_GAME_REWARDS_PER_DAY) {
-            await safeRollback(client);
-            return res.status(429).json({
-                success: false,
-                error: `Alcanzaste el máximo de ${MAX_GAME_REWARDS_PER_DAY} recompensas de juego por día.`
-            });
+        if (Number.isFinite(MAX_GAME_REWARDS_PER_DAY)) {
+            const usage = await getDailyUsage(client, userId);
+            if (Number(usage.game_count) >= MAX_GAME_REWARDS_PER_DAY) {
+                await safeRollback(client);
+                return res.status(429).json({
+                    success: false,
+                    error: `Alcanzaste el máximo de ${MAX_GAME_REWARDS_PER_DAY} recompensas de juego por día.`
+                });
+            }
         }
 
         const recent = await client.query(
@@ -998,19 +999,13 @@ app.post('/api/v1/game/claim', verifyToken, rewardRateLimit, async (req, res) =>
             return res.status(400).json({ success: false, error: 'La sesión de recompensa expiró.' });
         }
 
-        const usageUpdate = await client.query(
+        await client.query(
             `INSERT INTO reward_daily_usage (user_id, reward_date, video_count, game_count)
              VALUES ($1, CURRENT_DATE, 0, 1)
              ON CONFLICT (user_id, reward_date)
-             DO UPDATE SET game_count = reward_daily_usage.game_count + 1
-             WHERE reward_daily_usage.game_count < $2 RETURNING game_count`,
-            [userId, MAX_GAME_REWARDS_PER_DAY]
+             DO UPDATE SET game_count = reward_daily_usage.game_count + 1`,
+            [userId]
         );
-
-        if (usageUpdate.rows.length === 0) {
-            await safeRollback(client);
-            return res.status(429).json({ success: false, error: 'Límite diario de juego alcanzado.' });
-        }
 
         const transId = `GAME_${sessionId}`;
         const eventInserted = await insertRewardEvent(client, { userId, sourceType: 'WEB_GAME', transId, points: GAME_REWARD_POINTS });
