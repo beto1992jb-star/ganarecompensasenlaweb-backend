@@ -106,7 +106,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// CORS
+// CORS (MÚLTIPLES ORIGENES ACCESIBLES)
 // ============================================================
 
 const allowedOrigins = ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
