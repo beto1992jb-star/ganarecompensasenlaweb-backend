@@ -6,6 +6,7 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const bcrypt = require('bcryptjs'); // Librería para hashing de contraseñas
 
 const app = express();
 
@@ -25,13 +26,13 @@ if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) throw new Error('CPX_HASH_S
 if (!ALLOWED_ORIGIN) throw new Error('ALLOWED_ORIGIN es obligatorio.');
 
 const GAME_REWARD_POINTS = 1;
-const AD_REWARD_POINTS = 5;
 const GAME_MIN_SECONDS = 60; // 60 segundos de espera obligatoria
 const REWARD_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutos de tolerancia
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '20kb' }));
+app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.use((req, res, next) => {
@@ -41,6 +42,7 @@ app.use((req, res, next) => {
     next();
 });
 
+// Configuración de CORS dinámica desde variable de entorno
 const allowedOrigins = ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 app.use(cors({
     origin(origin, callback) {
@@ -63,7 +65,6 @@ const db = new Pool({
 function newRewardSessionId() { return crypto.randomBytes(32).toString('hex'); }
 function isValidRewardSessionId(val) { return typeof val === 'string' && /^[a-f0-9]{64}$/.test(val); }
 function safeRollback(client) { return client.query('ROLLBACK').catch(() => {}); }
-function hashPassword(password) { return crypto.pbkdf2Sync(password, JWT_SECRET, 1000, 64, 'sha512').toString('hex'); }
 
 async function ensureRewardTables() {
     await db.query(`
@@ -90,16 +91,6 @@ async function ensureRewardTables() {
             claimed_at TIMESTAMPTZ NULL,
             points_awarded INTEGER DEFAULT 0
         );
-
-        CREATE TABLE IF NOT EXISTS withdrawals (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            user_id UUID NOT NULL REFERENCES web_users(id),
-            method TEXT NOT NULL,
-            account_details TEXT NOT NULL,
-            amount_usd NUMERIC(10,2) NOT NULL,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        );
     `);
 }
 
@@ -115,153 +106,106 @@ const verifyToken = (req, res, next) => {
     }
 };
 
-// --- ENDPOINTS AUTENTICACIÓN ---
+// ==========================================
+// ENDPOINTS DE AUTENTICACIÓN (LOGIN & REGISTER)
+// ==========================================
+
+// POST /api/v1/auth/register (Opcional pero recomendado para crear usuarios)
 app.post('/api/v1/auth/register', async (req, res) => {
-    const { email, password, referral_code, country_code } = req.body || {};
-    if (!email || !password) return res.status(400).json({ success: false, error: 'Email y contraseña requeridos.' });
+    const { email, password } = req.body || {};
 
-    const client = await db.connect();
+    if (!email || !password) {
+        return res.status(400).json({ success: false, message: 'Correo y contraseña son obligatorios.' });
+    }
+
+    if (password.length < 6) {
+        return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 6 caracteres.' });
+    }
+
     try {
-        await client.query('BEGIN');
-        const passHash = hashPassword(password);
-        const myRefCode = crypto.randomBytes(4).toString('hex').toUpperCase();
+        const normalizedEmail = email.toLowerCase().trim();
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-        let referredBy = null;
-        if (referral_code) {
-            const refRes = await client.query('SELECT id FROM web_users WHERE referral_code = $1', [referral_code]);
-            if (refRes.rows.length > 0) referredBy = refRes.rows[0].id;
-        }
-
-        const userRes = await client.query(
-            `INSERT INTO web_users (email, password_hash, country_code, referral_code, referred_by)
-             VALUES ($1, $2, $3, $4, $5) RETURNING id, email, points_balance, referral_code`,
-            [email.toLowerCase(), passHash, country_code || 'AR', myRefCode, referredBy]
+        const result = await db.query(
+            `INSERT INTO web_users (email, password_hash) VALUES ($1, $2) RETURNING id, email, points_balance`,
+            [normalizedEmail, hashedPassword]
         );
 
-        if (referredBy) {
-            await client.query('UPDATE web_users SET total_referrals = total_referrals + 1 WHERE id = $1', [referredBy]);
-        }
+        const user = result.rows[0];
+        const token = jwt.sign(
+            { userId: user.id, email: user.email },
+            JWT_SECRET,
+            { expiresIn: '7d', issuer: 'ganarecompensasenlaweb' }
+        );
 
-        await client.query('COMMIT');
-        const user = userRes.rows[0];
-        const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d', issuer: 'ganarecompensasenlaweb' });
-
-        return res.json({ success: true, user: { id: user.id, email: user.email, points_balance: user.points_balance, my_referral_code: user.referral_code }, token });
-    } catch (e) {
-        await safeRollback(client);
-        if (e.code === '23505') return res.status(400).json({ success: false, error: 'El correo electrónico ya está registrado.' });
-        return res.status(500).json({ success: false, error: 'Error al registrar usuario.' });
-    } finally {
-        client.release();
-    }
-});
-
-app.post('/api/v1/auth/login', async (req, res) => {
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ success: false, error: 'Email y contraseña requeridos.' });
-
-    try {
-        const passHash = hashPassword(password);
-        const userRes = await db.query('SELECT * FROM web_users WHERE email = $1 AND password_hash = $2', [email.toLowerCase(), passHash]);
-
-        if (userRes.rows.length === 0) return res.status(401).json({ success: false, error: 'Credenciales inválidas.' });
-
-        const user = userRes.rows[0];
-        const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d', issuer: 'ganarecompensasenlaweb' });
-
-        return res.json({
+        return res.status(201).json({
             success: true,
-            user: { id: user.id, email: user.email, points_balance: user.points_balance, my_referral_code: user.referral_code },
-            token
+            message: 'Usuario registrado exitosamente.',
+            token,
+            user: { id: user.id, email: user.email, pointsBalance: user.points_balance }
         });
     } catch (e) {
-        return res.status(500).json({ success: false, error: 'Error al iniciar sesión.' });
+        if (e.code === '23505') { // Código de violación de restricción única (UNIQUE) en PostgreSQL
+            return res.status(409).json({ success: false, message: 'El correo electrónico ya está registrado.' });
+        }
+        console.error('Error en /auth/register:', e);
+        return res.status(500).json({ success: false, message: 'Error interno al registrar usuario.' });
     }
 });
 
-app.post('/api/v1/auth/forgot-password', (req, res) => {
-    return res.json({ success: true, message: 'Si el correo existe, recibirás instrucciones para restablecer tu contraseña.' });
-});
+// POST /api/v1/auth/login
+app.post('/api/v1/auth/login', async (req, res) => {
+    const { email, password } = req.body || {};
 
-app.get('/api/v1/user/profile', verifyToken, async (req, res) => {
+    if (!email || !password) {
+        return res.status(400).json({ success: false, message: 'Por favor, ingresa correo y contraseña.' });
+    }
+
     try {
-        const userRes = await db.query('SELECT id, email, points_balance, referral_code FROM web_users WHERE id = $1', [req.user.userId]);
-        if (userRes.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuario no encontrado.' });
+        const normalizedEmail = email.toLowerCase().trim();
+
+        // Buscar usuario en PostgreSQL
+        const userRes = await db.query('SELECT * FROM web_users WHERE email = $1', [normalizedEmail]);
+
+        if (userRes.rows.length === 0) {
+            return res.status(401).json({ success: false, message: 'Credenciales inválidas.' });
+        }
+
         const user = userRes.rows[0];
-        return res.json({ success: true, user: { id: user.id, email: user.email, points_balance: user.points_balance, my_referral_code: user.referral_code } });
-    } catch (e) {
-        return res.status(500).json({ success: false, error: 'Error al consultar datos.' });
-    }
-});
 
-// --- ENDPOINTS ANUNCIOS DIRECTOS ---
-app.post('/api/v1/ad/start', verifyToken, async (req, res) => {
-    const userId = req.user.userId;
-    const client = await db.connect();
-    try {
-        await client.query('BEGIN');
-        const sessionId = newRewardSessionId();
-        const started = new Date();
-        const expires = new Date(started.getTime() + REWARD_SESSION_MAX_AGE_MS);
+        // Comparar la contraseña ingresada con el hash encriptado
+        const isMatch = await bcrypt.compare(password, user.password_hash);
+        if (!isMatch) {
+            return res.status(401).json({ success: false, message: 'Credenciales inválidas.' });
+        }
 
-        await client.query(
-            `INSERT INTO reward_sessions (session_id, user_id, reward_type, started_at, expires_at) VALUES ($1, $2, 'video', $3, $4)`,
-            [sessionId, userId, started, expires]
+        // Generar Token JWT
+        const token = jwt.sign(
+            { userId: user.id, email: user.email },
+            JWT_SECRET,
+            { expiresIn: '7d', issuer: 'ganarecompensasenlaweb' }
         );
 
-        await client.query('COMMIT');
-        return res.json({ success: true, sessionId, adUrl: MONETAG_SDK_URL });
+        return res.status(200).json({
+            success: true,
+            message: 'Inicio de sesión exitoso.',
+            token,
+            user: {
+                id: user.id,
+                email: user.email,
+                pointsBalance: user.points_balance
+            }
+        });
     } catch (e) {
-        await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'Error al iniciar anuncio.' });
-    } finally {
-        client.release();
+        console.error('Error en /auth/login:', e);
+        return res.status(500).json({ success: false, message: 'Error interno del servidor.' });
     }
 });
 
-app.post('/api/v1/ad/claim', verifyToken, async (req, res) => {
-    const { sessionId } = req.body || {};
-    const userId = req.user.userId;
+// ==========================================
+// ENDPOINTS JUEGOS
+// ==========================================
 
-    if (!isValidRewardSessionId(sessionId)) return res.status(400).json({ success: false, error: 'Sesión inválida.' });
-
-    const client = await db.connect();
-    try {
-        await client.query('BEGIN');
-        const sRes = await client.query('SELECT * FROM reward_sessions WHERE session_id = $1 AND user_id = $2 FOR UPDATE', [sessionId, userId]);
-
-        if (sRes.rows.length === 0) {
-            await safeRollback(client);
-            return res.status(404).json({ success: false, error: 'Sesión no encontrada.' });
-        }
-
-        const session = sRes.rows[0];
-        if (session.claimed_at) {
-            await safeRollback(client);
-            return res.status(409).json({ success: false, error: 'Esta recompensa ya fue reclamada.' });
-        }
-
-        await client.query('UPDATE reward_sessions SET claimed_at = NOW(), points_awarded = $1 WHERE session_id = $2', [AD_REWARD_POINTS, sessionId]);
-        const balRes = await client.query('UPDATE web_users SET points_balance = points_balance + $1 WHERE id = $2 RETURNING points_balance', [AD_REWARD_POINTS, userId]);
-
-        // Comisión por referido (3%)
-        const uRes = await client.query('SELECT referred_by FROM web_users WHERE id = $1', [userId]);
-        if (uRes.rows[0] && uRes.rows[0].referred_by) {
-            const refPoints = Math.max(1, Math.round(AD_REWARD_POINTS * 0.03));
-            await client.query('UPDATE web_users SET points_balance = points_balance + $1 WHERE id = $2', [refPoints, uRes.rows[0].referred_by]);
-        }
-
-        await client.query('COMMIT');
-        return res.json({ success: true, message: 'Puntos acreditados con éxito.', newBalance: balRes.rows[0].points_balance });
-    } catch (e) {
-        await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'Error al validar anuncio.' });
-    } finally {
-        client.release();
-    }
-});
-
-// --- ENDPOINTS JUEGOS ---
 app.post('/api/v1/game/start', verifyToken, async (req, res) => {
     const userId = req.user.userId;
     const client = await db.connect();
@@ -337,44 +281,6 @@ app.post('/api/v1/game/claim', verifyToken, async (req, res) => {
         await safeRollback(client);
         console.error("Error en /game/claim:", e);
         return res.status(500).json({ success: false, error: 'Error interno al procesar el reclamo.' });
-    } finally {
-        client.release();
-    }
-});
-
-// --- ENDPOINTS SOLICITUD DE RETIRO ---
-app.post('/api/v1/withdraw/request', verifyToken, async (req, res) => {
-    const { method, details, amount } = req.body || {};
-    const userId = req.user.userId;
-
-    if (!method || !details || !amount || amount < 5) {
-        return res.status(400).json({ success: false, error: 'El retiro mínimo es de $5.00 USD y todos los campos son obligatorios.' });
-    }
-
-    const pointsNeeded = amount * 1000;
-    const client = await db.connect();
-
-    try {
-        await client.query('BEGIN');
-        const userRes = await client.query('SELECT points_balance FROM web_users WHERE id = $1 FOR UPDATE', [userId]);
-        const balance = userRes.rows[0]?.points_balance || 0;
-
-        if (balance < pointsNeeded) {
-            await safeRollback(client);
-            return res.status(400).json({ success: false, error: `Saldo insuficiente. Requiere ${pointsNeeded} puntos.` });
-        }
-
-        await client.query('UPDATE web_users SET points_balance = points_balance - $1 WHERE id = $2', [pointsNeeded, userId]);
-        await client.query(
-            'INSERT INTO withdrawals (user_id, method, account_details, amount_usd) VALUES ($1, $2, $3, $4)',
-            [userId, method, details, amount]
-        );
-
-        await client.query('COMMIT');
-        return res.json({ success: true, message: 'Solicitud de retiro registrada exitosamente.' });
-    } catch (e) {
-        await safeRollback(client);
-        return res.status(500).json({ success: false, error: 'Error al procesar la solicitud de retiro.' });
     } finally {
         client.release();
     }
