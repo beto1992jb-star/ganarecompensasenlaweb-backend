@@ -21,9 +21,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
 const CPX_HASH_SECRET = process.env.CPX_HASH_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
-
-// Si no está configurado en .env, usa los orígenes por defecto para producción y desarrollo local
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://ganarecompensasenlaweb.netlify.app,http://localhost:5500';
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 
@@ -52,12 +50,17 @@ if (!CPX_HASH_SECRET || CPX_HASH_SECRET.length < 16) {
     throw new Error('CPX_HASH_SECRET es obligatorio y debe tener al menos 16 caracteres.');
 }
 
+if (!ALLOWED_ORIGIN) {
+    throw new Error('ALLOWED_ORIGIN es obligatorio.');
+}
+
 // ============================================================
 // CONFIGURACIÓN DE NEGOCIO (TIEMPOS A 45s Y SIN LÍMITES)
 // ============================================================
 
 const POINT_TO_CURRENCY_RATIO = 0.001; // 1000 puntos = 1 USD
 
+const VIDEO_REWARD_POINTS = 10;
 const GAME_REWARD_POINTS = 1;
 const REFERRAL_BONUS = 25;
 
@@ -110,34 +113,21 @@ app.use((req, res, next) => {
 // CORS (MÚLTIPLES ORIGENES ACCESIBLES)
 // ============================================================
 
-const allowedOrigins = [
-    'https://ganarecompensasenlaweb.netlify.app',
-    'http://localhost:5500',
-    'http://127.0.0.1:5500',
-    ...ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
-];
+const allowedOrigins = ALLOWED_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
 
 const corsOptions = {
     origin(origin, callback) {
-        // Permite solicitudes sin origen (por ejemplo, llamadas de aplicaciones móviles o curl/postman)
         if (!origin) return callback(null, true);
-        
-        // Verifica si el origen entrante está dentro de la lista permitida
-        if (allowedOrigins.includes(origin)) {
-            return callback(null, true);
-        }
-        
-        // Retorna false limpiamente sin lanzar un "new Error()" para no provocar HTTP 500
-        return callback(null, false);
+        if (allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(new Error('Origen no permitido por CORS.'));
     },
-    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With', 'x-admin-secret'],
-    credentials: true,
+    credentials: false,
     optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Manejo explícito de peticiones preflight OPTIONS
 
 // ============================================================
 // RATE LIMITER
@@ -528,7 +518,7 @@ app.get('/api/monetag-postback', async (req, res) => {
     const usdAmount = Number(rawUsd);
     const calculatedPoints = Number.isFinite(usdAmount) && usdAmount > 0 
         ? Math.round(usdAmount / POINT_TO_CURRENCY_RATIO) 
-        : 10;
+        : VIDEO_REWARD_POINTS;
 
     try {
         await db.query(
@@ -789,7 +779,7 @@ app.post('/api/v1/web-video/start', verifyToken, rewardRateLimit, async (req, re
 
         await client.query('COMMIT');
 
-        const directLinkUrl = process.env.MONETAG_DIRECT_LINK_URL || "https://example.com/ad-link";
+        const directLinkUrl = process.env.MONETAG_DIRECT_LINK_URL || "https://omg10.com/4/11538152";
 
         return res.json({
             success: true,
@@ -860,7 +850,7 @@ app.post('/api/v1/web-video/claim', verifyToken, rewardRateLimit, async (req, re
             return res.status(400).json({ success: false, error: 'La sesión de recompensa expiró.' });
         }
 
-        const realPoints = Number(session.points_awarded) > 0 ? Number(session.points_awarded) : 10;
+        const realPoints = Number(session.points_awarded) > 0 ? Number(session.points_awarded) : VIDEO_REWARD_POINTS;
 
         await client.query(
             `INSERT INTO reward_daily_usage (user_id, reward_date, video_count, game_count)
@@ -889,7 +879,8 @@ app.post('/api/v1/web-video/claim', verifyToken, rewardRateLimit, async (req, re
             success: true,
             pointsAwarded: realPoints,
             newBalance: balanceRes.rows[0].points_balance,
-            cooldownSeconds: VIDEO_COOLDOWN_MS / 1000
+            cooldownSeconds: VIDEO_COOLDOWN_MS / 1000,
+            message: `¡Puntos otorgados con éxito! Sumaste ${realPoints} pts.`
         });
     } catch (error) {
         await safeRollback(client);
