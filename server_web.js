@@ -64,6 +64,28 @@ async function initDb() {
 }
 initDb();
 
+// Función auxiliar para generar un código de referido único
+async function generateUniqueReferralCode() {
+  let isUnique = false;
+  let code = '';
+  let attempts = 0;
+
+  while (!isUnique && attempts < 10) {
+    code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const check = await pool.query('SELECT id FROM users WHERE referral_code = $1', [code]);
+    if (check.rows.length === 0) {
+      isUnique = true;
+    }
+    attempts++;
+  }
+
+  if (!isUnique) {
+    code = uuidv4().substring(0, 8).toUpperCase();
+  }
+
+  return code;
+}
+
 // --- MIDDLEWARE DE AUTENTICACIÓN ---
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -87,7 +109,7 @@ function formatUser(user) {
   };
 }
 
-// --- RUTA RAIZ DE PRUEBA (SOLUCIONA CANNOT GET /) ---
+// --- RUTA RAÍZ DE PRUEBA ---
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
@@ -108,40 +130,68 @@ app.get('/', (req, res) => {
 app.post('/api/v1/auth/register', async (req, res) => {
   try {
     const { email, password, referral_code } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos.' });
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email y contraseña requeridos.' });
+    }
 
-    const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (existingUser.rows.length > 0) return res.status(400).json({ error: 'El correo ya está registrado.' });
+    const cleanEmail = email.trim().toLowerCase();
 
+    // Verificación de existencia del usuario
+    const existingUser = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ error: 'El correo ya está registrado.' });
+    }
+
+    // Verificación opcional del código de referido recibido
     let referredByUserId = null;
-    if (referral_code) {
-      const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code.toUpperCase()]);
-      if (referrer.rows.length > 0) referredByUserId = referrer.rows[0].id;
+    if (referral_code && typeof referral_code === 'string' && referral_code.trim() !== '') {
+      const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code.trim().toUpperCase()]);
+      if (referrer.rows.length > 0) {
+        referredByUserId = referrer.rows[0].id;
+      }
     }
 
     const userId = uuidv4();
-    const myReferralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const myReferralCode = await generateUniqueReferralCode();
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const insertResult = await pool.query(
       `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance)
        VALUES ($1, $2, $3, $4, $5, 0) RETURNING *`,
-      [userId, email, hashedPassword, myReferralCode, referredByUserId]
+      [userId, cleanEmail, hashedPassword, myReferralCode, referredByUserId]
     );
 
     const newUser = insertResult.rows[0];
     const token = jwt.sign({ id: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '7d' });
 
-    res.status(201).json({ message: 'Registro exitoso.', token, user: formatUser(newUser) });
+    return res.status(201).json({ 
+      message: 'Registro exitoso.', 
+      token, 
+      user: formatUser(newUser) 
+    });
+
   } catch (error) {
-    res.status(500).json({ error: 'Error en servidor.' });
+    console.error("Error detallado en registro:", error);
+    
+    // Captura de duplicidad en base de datos si ocurre en la inserción
+    if (error.code === '23505') {
+      return res.status(400).json({ error: 'El correo o código ya se encuentra en uso.' });
+    }
+    
+    return res.status(500).json({ error: 'Error interno en el servidor.' });
   }
 });
 
 app.post('/api/v1/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email y contraseña requeridos.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
     const user = result.rows[0];
 
     if (!user || !(await bcrypt.compare(password, user.password))) {
@@ -151,6 +201,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ message: 'Inicio de sesión exitoso.', token, user: formatUser(user) });
   } catch (error) {
+    console.error("Error en login:", error);
     res.status(500).json({ error: 'Error en servidor.' });
   }
 });
