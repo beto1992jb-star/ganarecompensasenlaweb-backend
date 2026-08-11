@@ -87,6 +87,22 @@ function formatUser(user) {
   };
 }
 
+// --- RUTA RAIZ DE PRUEBA (SOLUCIONA CANNOT GET /) ---
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    message: 'API de GanaRecompensas funcionando correctamente 🚀',
+    endpoints: {
+      register: 'POST /api/v1/auth/register',
+      login: 'POST /api/v1/auth/login',
+      profile: 'GET /api/v1/user/profile',
+      startAd: 'POST /api/v1/ad/start',
+      claimAd: 'POST /api/v1/ad/claim',
+      withdraw: 'POST /api/v1/withdraw/request'
+    }
+  });
+});
+
 // --- RUTAS DE AUTENTICACIÓN ---
 
 app.post('/api/v1/auth/register', async (req, res) => {
