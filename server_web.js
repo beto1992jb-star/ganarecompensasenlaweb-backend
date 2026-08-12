@@ -11,16 +11,17 @@ const app = express();
 const PORT = process.env.PORT || 5500;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
+const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 
-// --- CONFIGURACIÓN DE CORS MEJORADA ---
+// --- CONFIGURACIÓN CORS MEJORADA ---
 app.use(cors({
-  origin: '*', // O especifica tu dominio: 'https://ganarecompensasenlaweb.netlify.app'
+  origin: ['https://ganarecompensasenlaweb.netlify.app', 'http://localhost:5500', 'http://127.0.0.1:5500'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 
 app.options('*', cors());
-
 app.use(express.json());
 
 // --- BASE DE DATOS (PostgreSQL en Render) ---
@@ -231,7 +232,7 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
     const now = Date.now();
     await pool.query('INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)', [sessionId, req.user.id, now]);
 
-    res.json({ sessionId, waitSeconds: 15 });
+    res.json({ sessionId, adUrl: MONETAG_DIRECT_LINK, waitSeconds: 45 });
   } catch (err) {
     res.status(500).json({ error: 'Error al iniciar anuncio.' });
   }
@@ -250,7 +251,7 @@ app.post('/api/v1/ad/claim', authenticateToken, async (req, res) => {
     if (parseInt(session.claimed) === 1) return res.status(400).json({ error: 'Recompensa ya reclamada.' });
 
     const elapsedSeconds = (Date.now() - parseInt(session.created_at)) / 1000;
-    if (elapsedSeconds < 10) return res.status(400).json({ error: 'Espere a que finalice el video publicitario.' });
+    if (elapsedSeconds < 40) return res.status(400).json({ error: 'Espere a que finalice el temporizador.' });
 
     const pointsAwarded = 10;
 
