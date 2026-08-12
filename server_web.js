@@ -12,8 +12,15 @@ const PORT = process.env.PORT || 5500;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 
-// --- MIDDLEWARES ---
-app.use(cors());
+// --- CONFIGURACIÓN DE CORS MEJORADA ---
+app.use(cors({
+  origin: '*', // O especifica tu dominio: 'https://ganarecompensasenlaweb.netlify.app'
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.options('*', cors());
+
 app.use(express.json());
 
 // --- BASE DE DATOS (PostgreSQL en Render) ---
@@ -136,13 +143,11 @@ app.post('/api/v1/auth/register', async (req, res) => {
 
     const cleanEmail = email.trim().toLowerCase();
 
-    // Verificación de existencia del usuario
     const existingUser = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
     if (existingUser.rows.length > 0) {
       return res.status(400).json({ error: 'El correo ya está registrado.' });
     }
 
-    // Verificación opcional del código de referido recibido
     let referredByUserId = null;
     if (referral_code && typeof referral_code === 'string' && referral_code.trim() !== '') {
       const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code.trim().toUpperCase()]);
@@ -172,11 +177,9 @@ app.post('/api/v1/auth/register', async (req, res) => {
 
   } catch (error) {
     console.error("Error detallado en registro:", error);
-    
     if (error.code === '23505') {
       return res.status(400).json({ error: 'El correo o código ya se encuentra en uso.' });
     }
-    
     return res.status(500).json({ error: 'Error interno en el servidor.' });
   }
 });
@@ -220,7 +223,7 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// --- RUTAS DE ANUNCIOS MONETAG (REWARDED VIDEO) ---
+// --- RUTAS DE ANUNCIOS MONETAG ---
 
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
@@ -247,7 +250,6 @@ app.post('/api/v1/ad/claim', authenticateToken, async (req, res) => {
     if (parseInt(session.claimed) === 1) return res.status(400).json({ error: 'Recompensa ya reclamada.' });
 
     const elapsedSeconds = (Date.now() - parseInt(session.created_at)) / 1000;
-    // Tolerancia mínima para videos de Monetag
     if (elapsedSeconds < 10) return res.status(400).json({ error: 'Espere a que finalice el video publicitario.' });
 
     const pointsAwarded = 10;
