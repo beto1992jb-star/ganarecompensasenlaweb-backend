@@ -11,7 +11,6 @@ const app = express();
 const PORT = process.env.PORT || 5500;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
-const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 
 // --- MIDDLEWARES ---
 app.use(cors());
@@ -30,11 +29,10 @@ async function initDb() {
       CREATE TABLE IF NOT EXISTS users (
         id VARCHAR(36) PRIMARY KEY,
         email VARCHAR(255) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
+        password VARCHAR(255) NOT NULL,
         referral_code VARCHAR(50) UNIQUE NOT NULL,
         referred_by VARCHAR(36),
         points_balance INT DEFAULT 0,
-        country_code VARCHAR(5) DEFAULT 'AR',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -130,7 +128,7 @@ app.get('/', (req, res) => {
 
 app.post('/api/v1/auth/register', async (req, res) => {
   try {
-    const { email, password, referral_code, country_code } = req.body;
+    const { email, password, referral_code } = req.body;
     
     if (!email || !password) {
       return res.status(400).json({ error: 'Email y contraseña requeridos.' });
@@ -156,13 +154,11 @@ app.post('/api/v1/auth/register', async (req, res) => {
     const userId = uuidv4();
     const myReferralCode = await generateUniqueReferralCode();
     const hashedPassword = await bcrypt.hash(password, 10);
-    const country = country_code || 'AR';
 
-    // CORRECCIÓN: Se usa la columna password_hash en lugar de password
     const insertResult = await pool.query(
-      `INSERT INTO users (id, email, password_hash, referral_code, referred_by, points_balance, country_code)
-       VALUES ($1, $2, $3, $4, $5, 0, $6) RETURNING *`,
-      [userId, cleanEmail, hashedPassword, myReferralCode, referredByUserId, country]
+      `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance)
+       VALUES ($1, $2, $3, $4, $5, 0) RETURNING *`,
+      [userId, cleanEmail, hashedPassword, myReferralCode, referredByUserId]
     );
 
     const newUser = insertResult.rows[0];
@@ -196,8 +192,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
     const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
     const user = result.rows[0];
 
-    // CORRECCIÓN: Se compara el password ingresado contra user.password_hash
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+    if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(400).json({ error: 'Credenciales inválidas.' });
     }
 
@@ -225,7 +220,7 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// --- RUTAS DE ANUNCIOS MONETAG ---
+// --- RUTAS DE ANUNCIOS MONETAG (REWARDED VIDEO) ---
 
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
@@ -233,7 +228,7 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
     const now = Date.now();
     await pool.query('INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)', [sessionId, req.user.id, now]);
 
-    res.json({ sessionId, adUrl: MONETAG_DIRECT_LINK, waitSeconds: 45 });
+    res.json({ sessionId, waitSeconds: 15 });
   } catch (err) {
     res.status(500).json({ error: 'Error al iniciar anuncio.' });
   }
@@ -252,7 +247,8 @@ app.post('/api/v1/ad/claim', authenticateToken, async (req, res) => {
     if (parseInt(session.claimed) === 1) return res.status(400).json({ error: 'Recompensa ya reclamada.' });
 
     const elapsedSeconds = (Date.now() - parseInt(session.created_at)) / 1000;
-    if (elapsedSeconds < 40) return res.status(400).json({ error: 'Espere a que finalice el temporizador.' });
+    // Tolerancia mínima para videos de Monetag
+    if (elapsedSeconds < 10) return res.status(400).json({ error: 'Espere a que finalice el video publicitario.' });
 
     const pointsAwarded = 10;
 
