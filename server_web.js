@@ -342,11 +342,11 @@ app.get('/api/v1/monetag/postback', async (req, res) => {
   }
 });
 
-// --- POSTBACK S2S CPX RESEARCH (PAGO REAL) ---
+// --- POSTBACK S2S CPX RESEARCH (PAGO REAL Y REVERSIONES) ---
 app.get('/api/v1/cpx/postback', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { user_id, points, status, secret } = req.query;
+    const { user_id, points, status, trans_id, secret } = req.query;
 
     if (secret !== POSTBACK_SECRET) {
       console.warn("⚠️ Intento de Postback CPX rechazado: Secreto inválido.");
@@ -383,11 +383,11 @@ app.get('/api/v1/cpx/postback', async (req, res) => {
           await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, referrerId]);
         }
       }
-      console.log(`✅ [CPX Postback] Pago validado: ${pointsAwarded} pts a usuario ${user_id}`);
+      console.log(`✅ [CPX Postback] Pago validado (TransID: ${trans_id || 'N/A'}): ${pointsAwarded} pts a usuario ${user_id}`);
     } else if (statusNum === 2) {
-      // Estado 2: Reversión / Contracargo de la red publicitaria
+      // Estado 2: Reversión / Contracargo / Cancelación de transacción
       await client.query('UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2', [pointsAwarded, user_id]);
-      console.log(`⚠️ [CPX Postback] Reversión ejecutada: ${pointsAwarded} pts del usuario ${user_id}`);
+      console.log(`⚠️ [CPX Postback] Reversión ejecutada (TransID: ${trans_id || 'N/A'}): ${pointsAwarded} pts retirados al usuario ${user_id}`);
     }
 
     await client.query('COMMIT');
@@ -439,7 +439,7 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
     await client.query('ROLLBACK');
     console.error("❌ Error en retiro:", err);
     res.status(500).json({ error: 'Error al procesar el retiro.' });
-  } finale {
+  } finally {
     client.release();
   }
 });
