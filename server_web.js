@@ -30,9 +30,10 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Inicialización de tablas
+// Inicialización segura de tablas
 async function initDb() {
   try {
+    // 1. Tabla de Usuarios
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id VARCHAR(36) PRIMARY KEY,
@@ -43,15 +44,21 @@ async function initDb() {
         points_balance INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
 
+    // 2. Tabla de Sesiones / Logs de Anuncios
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS ad_sessions (
         id VARCHAR(36) PRIMARY KEY,
         user_id VARCHAR(36) NOT NULL,
         created_at BIGINT NOT NULL,
         claimed INT DEFAULT 0,
-        FOREIGN KEY(user_id) REFERENCES users(id)
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
+    `);
 
+    // 3. Tabla de Retiros
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS withdrawals (
         id VARCHAR(36) PRIMARY KEY,
         user_id VARCHAR(36) NOT NULL,
@@ -61,12 +68,13 @@ async function initDb() {
         points_deducted INT NOT NULL,
         status VARCHAR(20) DEFAULT 'PENDING',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(user_id) REFERENCES users(id)
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
     `);
-    console.log("Tablas inicializadas correctamente.");
+
+    console.log("✅ Tablas inicializadas y sincronizadas correctamente.");
   } catch (err) {
-    console.error("Error al inicializar la base de datos:", err);
+    console.error("❌ Error al inicializar la base de datos:", err);
   }
 }
 initDb();
@@ -126,7 +134,7 @@ app.get('/', (req, res) => {
       login: 'POST /api/v1/auth/login',
       profile: 'GET /api/v1/user/profile',
       startAd: 'POST /api/v1/ad/start',
-      claimAd: 'POST /api/v1/ad/claim',
+      postbackMonetag: 'GET /api/v1/monetag/postback',
       withdraw: 'POST /api/v1/withdraw/request'
     }
   });
@@ -177,7 +185,7 @@ app.post('/api/v1/auth/register', async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Error detallado en registro:", error);
+    console.error("❌ Error detallado en registro:", error);
     if (error.code === '23505') {
       return res.status(400).json({ error: 'El correo o código ya se encuentra en uso.' });
     }
@@ -203,7 +211,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ message: 'Inicio de sesión exitoso.', token, user: formatUser(user) });
   } catch (error) {
-    console.error("Error en login:", error);
+    console.error("❌ Error en login:", error);
     res.status(500).json({ error: 'Error en servidor.' });
   }
 });
@@ -226,52 +234,71 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
 
 // --- RUTAS DE ANUNCIOS MONETAG ---
 
+// Genera un SmartLink dinámico vinculando el ID del usuario como sub1
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
     const sessionId = uuidv4();
     const now = Date.now();
-    await pool.query('INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)', [sessionId, req.user.id, now]);
+    
+    await pool.query(
+      'INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)',
+      [sessionId, req.user.id, now]
+    );
 
-    res.json({ sessionId, adUrl: MONETAG_DIRECT_LINK, waitSeconds: 45 });
+    const dynamicAdUrl = `${MONETAG_DIRECT_LINK}?sub1=${req.user.id}`;
+    res.json({ sessionId, adUrl: dynamicAdUrl });
   } catch (err) {
-    res.status(500).json({ error: 'Error al iniciar anuncio.' });
+    console.error("❌ Error en /api/v1/ad/start:", err);
+    res.status(500).json({ 
+      error: 'Error al iniciar anuncio.',
+      details: err.message 
+    });
   }
 });
 
-app.post('/api/v1/ad/claim', authenticateToken, async (req, res) => {
+// RECEPCIÓN DE POSTBACK S2S MONETAG
+// Monetag llamará a este endpoint cuando se confirme una conversión/interacción válida
+app.get('/api/v1/monetag/postback', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { sessionId } = req.body;
-    const userId = req.user.id;
+    const { sub_id, sub1, reward, points } = req.query;
+    const userId = sub_id || sub1;
 
-    const sessionRes = await client.query('SELECT * FROM ad_sessions WHERE id = $1 AND user_id = $2', [sessionId, userId]);
-    const session = sessionRes.rows[0];
+    if (!userId) {
+      return res.status(400).send('Missing sub_id/sub1 parameter');
+    }
 
-    if (!session) return res.status(404).json({ error: 'Sesión no válida.' });
-    if (parseInt(session.claimed) === 1) return res.status(400).json({ error: 'Recompensa ya reclamada.' });
-
-    const elapsedSeconds = (Date.now() - parseInt(session.created_at)) / 1000;
-    if (elapsedSeconds < 40) return res.status(400).json({ error: 'Espere a que finalice el temporizador.' });
-
-    const pointsAwarded = 10;
+    const pointsAwarded = Math.max(1, parseInt(points || reward || 10, 10));
 
     await client.query('BEGIN');
-    await client.query('UPDATE ad_sessions SET claimed = 1 WHERE id = $1', [sessionId]);
+    
+    // Validar usuario
+    const userCheck = await client.query('SELECT id, referred_by FROM users WHERE id = $1', [userId]);
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).send('User not found');
+    }
+
+    // Acreditar puntos al usuario
     await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, userId]);
 
-    const userRes = await client.query('SELECT referred_by FROM users WHERE id = $1', [userId]);
-    if (userRes.rows[0] && userRes.rows[0].referred_by) {
+    // Calcular y otorgar comisión al referente
+    const referrerId = userCheck.rows[0].referred_by;
+    if (referrerId) {
       const commisionPoints = Math.floor(pointsAwarded * 0.03);
       if (commisionPoints > 0) {
-        await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, userRes.rows[0].referred_by]);
+        await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, referrerId]);
       }
     }
-    await client.query('COMMIT');
 
-    res.json({ message: '¡Recompensa acreditada!', pointsAwarded });
+    await client.query('COMMIT');
+    console.log(`✅ [Postback Monetag] Acreditados ${pointsAwarded} pts al usuario ${userId}`);
+    return res.status(200).send('OK');
+
   } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: 'Error al acreditar puntos.' });
+    console.error("❌ Error en Postback Monetag:", err);
+    return res.status(500).send('Internal Server Error');
   } finally {
     client.release();
   }
@@ -316,6 +343,7 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
     res.json({ message: 'Solicitud enviada correctamente.', withdrawalId: withdrawId });
   } catch (err) {
     await client.query('ROLLBACK');
+    console.error("❌ Error en /api/v1/withdraw/request:", err);
     res.status(500).json({ error: 'Error al procesar el retiro.' });
   } finally {
     client.release();
