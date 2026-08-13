@@ -27,6 +27,11 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
+// 🟢 RUTA RAÍZ (Resuelve el mensaje "Cannot GET /" en Render)
+app.get('/', (req, res) => {
+  res.status(200).send('API de GanaRecompensasEnLaWeb funcionando correctamente 🚀');
+});
+
 // --- BASE DE DATOS (PostgreSQL) ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/ganarecompensas',
