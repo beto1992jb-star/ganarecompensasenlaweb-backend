@@ -13,7 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 
-// Clave secreta para validar que la red publicitaria sea quien hace el Postback S2S verdaderamente
+// Clave secreta para validar postbacks S2S
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || 'mi_secreto_postback_123';
 
 // --- CONFIGURACIÓN CORS ---
@@ -33,7 +33,6 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Inicialización de tablas
 async function initDb() {
   try {
     await pool.query(`
@@ -59,6 +58,16 @@ async function initDb() {
     `);
 
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS video_claims (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        video_id VARCHAR(50) NOT NULL,
+        claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    `);
+
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS withdrawals (
         id VARCHAR(36) PRIMARY KEY,
         user_id VARCHAR(36) NOT NULL,
@@ -72,9 +81,9 @@ async function initDb() {
       );
     `);
 
-    console.log("✅ Tablas inicializadas y sincronizadas correctamente.");
+    console.log("✅ Base de datos inicializada.");
   } catch (err) {
-    console.error("❌ Error al inicializar la base de datos:", err);
+    console.error("❌ Error en DB:", err);
   }
 }
 initDb();
@@ -87,17 +96,11 @@ async function generateUniqueReferralCode() {
   while (!isUnique && attempts < 10) {
     code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const check = await pool.query('SELECT id FROM users WHERE referral_code = $1', [code]);
-    if (check.rows.length === 0) {
-      isUnique = true;
-    }
+    if (check.rows.length === 0) isUnique = true;
     attempts++;
   }
 
-  if (!isUnique) {
-    code = uuidv4().substring(0, 8).toUpperCase();
-  }
-
-  return code;
+  return isUnique ? code : uuidv4().substring(0, 8).toUpperCase();
 }
 
 // --- MIDDLEWARE DE AUTENTICACIÓN ---
@@ -105,7 +108,7 @@ function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) return res.status(401).json({ error: 'Token de acceso no proporcionado.' });
+  if (!token) return res.status(401).json({ error: 'Token no proporcionado.' });
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ error: 'Token inválido o expirado.' });
@@ -123,47 +126,21 @@ function formatUser(user) {
   };
 }
 
-// --- RUTA RAÍZ ---
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    message: 'API de GanaRecompensas activa 🚀',
-    endpoints: {
-      register: 'POST /api/v1/auth/register',
-      login: 'POST /api/v1/auth/login',
-      profile: 'GET /api/v1/user/profile',
-      startAd: 'POST /api/v1/ad/start',
-      postbackMonetag: 'GET /api/v1/monetag/postback',
-      postbackCPX: 'GET /api/v1/cpx/postback',
-      withdraw: 'POST /api/v1/withdraw/request',
-      youtubeReward: 'POST /api/v1/video/youtube-reward'
-    }
-  });
-});
-
-// --- AUTENTICACIÓN ---
+// --- RUTAS DE AUTENTICACIÓN ---
 
 app.post('/api/v1/auth/register', async (req, res) => {
   try {
     const { email, password, referral_code } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email y contraseña requeridos.' });
-    }
+    if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos.' });
 
     const cleanEmail = email.trim().toLowerCase();
-
     const existingUser = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
-    if (existingUser.rows.length > 0) {
-      return res.status(400).json({ error: 'El correo ya está registrado.' });
-    }
+    if (existingUser.rows.length > 0) return res.status(400).json({ error: 'El correo ya existe.' });
 
     let referredByUserId = null;
     if (referral_code && typeof referral_code === 'string' && referral_code.trim() !== '') {
       const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code.trim().toUpperCase()]);
-      if (referrer.rows.length > 0) {
-        referredByUserId = referrer.rows[0].id;
-      }
+      if (referrer.rows.length > 0) referredByUserId = referrer.rows[0].id;
     }
 
     const userId = uuidv4();
@@ -179,24 +156,17 @@ app.post('/api/v1/auth/register', async (req, res) => {
     const newUser = insertResult.rows[0];
     const token = jwt.sign({ id: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '7d' });
 
-    return res.status(201).json({ 
-      message: 'Registro exitoso.', 
-      token, 
-      user: formatUser(newUser) 
-    });
-
+    return res.status(201).json({ message: 'Registro exitoso.', token, user: formatUser(newUser) });
   } catch (error) {
     console.error("❌ Error en registro:", error);
-    return res.status(500).json({ error: 'Error interno en el servidor.' });
+    return res.status(500).json({ error: 'Error en servidor.' });
   }
 });
 
 app.post('/api/v1/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email y contraseña requeridos.' });
-    }
+    if (!email || !password) return res.status(400).json({ error: 'Credenciales faltantes.' });
 
     const cleanEmail = email.trim().toLowerCase();
     const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
@@ -207,18 +177,11 @@ app.post('/api/v1/auth/login', async (req, res) => {
     }
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ message: 'Inicio de sesión exitoso.', token, user: formatUser(user) });
+    res.json({ message: 'Login exitoso.', token, user: formatUser(user) });
   } catch (error) {
-    console.error("❌ Error en login:", error);
     res.status(500).json({ error: 'Error en servidor.' });
   }
 });
-
-app.post('/api/v1/auth/forgot-password', (req, res) => {
-  res.json({ message: 'Si el correo existe, recibirás instrucciones.' });
-});
-
-// --- RUTA DE USUARIO ---
 
 app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   try {
@@ -226,143 +189,103 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado.' });
     res.json({ user: formatUser(result.rows[0]) });
   } catch (err) {
-    res.status(500).json({ error: 'Error al consultar perfil.' });
+    res.status(500).json({ error: 'Error de servidor.' });
   }
 });
 
-// --- RUTA RECOMPENSA YOUTUBE ---
+// --- CATÁLOGO DE VIDEOS Y RECOMPENSAS ---
+
+app.get('/api/v1/video/list', authenticateToken, async (req, res) => {
+  const videos = [
+    { id: 'vid_01', title: 'Trailer Promocional #1', youtube_id: 'M7lc1UVf-VE', points: 15 },
+    { id: 'vid_02', title: 'Tutorial Placas y Pagos', youtube_id: 'L_LUpnjgPso', points: 20 },
+    { id: 'vid_03', title: 'Presentación de Servicios', youtube_id: 'dQw4w9WgXcQ', points: 15 }
+  ];
+  res.json(videos);
+});
 
 app.post('/api/v1/video/youtube-reward', authenticateToken, async (req, res) => {
+  const { video_id } = req.body;
+  if (!video_id) return res.status(400).json({ error: 'ID de video requerido.' });
+
   const client = await pool.connect();
   try {
-    const pointsAwarded = 15; // Puntos por video de YouTube completo
-
     await client.query('BEGIN');
-    
-    const userCheck = await client.query('SELECT id, referred_by FROM users WHERE id = $1', [req.user.id]);
-    if (userCheck.rows.length === 0) {
+
+    // Validación de límite por 24h por video
+    const checkClaim = await client.query(
+      `SELECT id FROM video_claims 
+       WHERE user_id = $1 AND video_id = $2 
+       AND claimed_at > NOW() - INTERVAL '24 hours'`,
+      [req.user.id, video_id]
+    );
+
+    if (checkClaim.rows.length > 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Usuario no encontrado' });
+      return res.status(400).json({ error: 'Ya has reclamado la recompensa de este video en las últimas 24 horas.' });
     }
+
+    const pointsAwarded = 15;
+
+    await client.query(
+      'INSERT INTO video_claims (id, user_id, video_id) VALUES ($1, $2, $3)',
+      [uuidv4(), req.user.id, video_id]
+    );
 
     await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, req.user.id]);
 
-    // Comisión del 3% al referente
-    const referrerId = userCheck.rows[0].referred_by;
-    if (referrerId) {
-      const commisionPoints = Math.floor(pointsAwarded * 0.03);
-      if (commisionPoints > 0) {
-        await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, referrerId]);
-      }
-    }
-
     await client.query('COMMIT');
-    return res.json({ message: `¡Ganaste ${pointsAwarded} puntos por ver el video de YouTube!` });
+    return res.json({ message: `¡Ganaste ${pointsAwarded} puntos por ver el video!` });
 
   } catch (err) {
     await client.query('ROLLBACK');
     console.error("❌ Error en recompensa YouTube:", err);
-    return res.status(500).json({ error: 'Error al procesar recompensa.' });
+    return res.status(500).json({ error: 'Error procesando recompensa.' });
   } finally {
     client.release();
   }
 });
 
-// --- INICIO DE OFERTA DE ANUNCIO ---
+// --- OFERTAS DE ANUNCIOS Y ENLACES ---
 
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
     const sessionId = uuidv4();
-    const now = Date.now();
-    
     await pool.query(
       'INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)',
-      [sessionId, req.user.id, now]
+      [sessionId, req.user.id, Date.now()]
     );
-
-    // Pasamos el ID del usuario como sub1 para que Monetag lo devuelva en el Postback S2S
-    const dynamicAdUrl = `${MONETAG_DIRECT_LINK}?sub1=${req.user.id}`;
-    res.json({ sessionId, adUrl: dynamicAdUrl });
+    res.json({ sessionId, adUrl: `${MONETAG_DIRECT_LINK}?sub1=${req.user.id}` });
   } catch (err) {
-    console.error("❌ Error en /api/v1/ad/start:", err);
     res.status(500).json({ error: 'Error al iniciar oferta.' });
   }
 });
 
-// --- POSTBACK S2S MONETAG (PAGO REAL DE LA RED) ---
-app.get('/api/v1/monetag/postback', async (req, res) => {
-  const client = await pool.connect();
+// --- INTEGRACIÓN CPX RESEARCH ---
+
+app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
   try {
-    const { sub_id, sub1, reward, points, secret } = req.query;
-    const userId = sub_id || sub1;
-
-    // Validación de seguridad por token/secreto S2S
-    if (secret !== POSTBACK_SECRET) {
-      console.warn("⚠️ Intento de Postback Monetag rechazado: Secreto inválido.");
-      return res.status(403).send('Unauthorized Postback');
-    }
-
-    if (!userId) {
-      return res.status(400).send('Missing sub_id/sub1 parameter');
-    }
-
-    // Puntos pagados por la red publicitaria
-    const pointsAwarded = Math.max(1, parseInt(points || reward || 10, 10));
-
-    await client.query('BEGIN');
-    
-    const userCheck = await client.query('SELECT id, referred_by FROM users WHERE id = $1', [userId]);
-    if (userCheck.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).send('User not found');
-    }
-
-    // Acreditar puntos al usuario
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, userId]);
-
-    // Comisión del 3% al referente
-    const referrerId = userCheck.rows[0].referred_by;
-    if (referrerId) {
-      const commisionPoints = Math.floor(pointsAwarded * 0.03);
-      if (commisionPoints > 0) {
-        await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, referrerId]);
-      }
-    }
-
-    await client.query('COMMIT');
-    console.log(`✅ [Postback Monetag] Confirmación recibida: ${pointsAwarded} pts para usuario ${userId}`);
-    return res.status(200).send('OK');
-
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error("❌ Error en Postback Monetag:", err);
-    return res.status(500).send('Internal Server Error');
-  } finally {
-    client.release();
+    const url = `https://offers.cpx-research.com/index.php?app_id=${CPX_APP_ID}&ext_user_id=${req.user.id}&username=${encodeURIComponent(req.user.email)}`;
+    res.json({ url });
+  } catch (error) {
+    res.status(500).json({ error: 'Error al obtener URL de CPX.' });
   }
 });
 
-// --- POSTBACK S2S CPX RESEARCH (PAGO REAL Y REVERSIONES) ---
 app.get('/api/v1/cpx/postback', async (req, res) => {
   const client = await pool.connect();
   try {
     const { user_id, points, status, trans_id, secret } = req.query;
 
     if (secret !== POSTBACK_SECRET) {
-      console.warn("⚠️ Intento de Postback CPX rechazado: Secreto inválido.");
-      return res.status(403).send('Unauthorized Postback');
+      console.warn("⚠️ Postback CPX rechazado: Secreto inválido.");
+      return res.status(403).send('Unauthorized');
     }
 
-    if (!user_id) {
-      return res.status(400).send('Missing user_id');
-    }
+    if (!user_id) return res.status(400).send('Missing user_id');
 
     const statusNum = parseInt(status || '1', 10);
     const pointsAwarded = parseInt(points || '0', 10);
-
-    if (pointsAwarded <= 0) {
-      return res.status(200).send('OK');
-    }
 
     await client.query('BEGIN');
 
@@ -372,22 +295,18 @@ app.get('/api/v1/cpx/postback', async (req, res) => {
       return res.status(404).send('User not found');
     }
 
-    if (statusNum === 1) {
-      // Estado 1: Conversión exitosa y pagada
+    if (statusNum === 1 && pointsAwarded > 0) {
       await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, user_id]);
-
+      
       const referrerId = userCheck.rows[0].referred_by;
       if (referrerId) {
-        const commisionPoints = Math.floor(pointsAwarded * 0.03);
-        if (commisionPoints > 0) {
-          await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, referrerId]);
+        const commision = Math.floor(pointsAwarded * 0.03);
+        if (commision > 0) {
+          await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commision, referrerId]);
         }
       }
-      console.log(`✅ [CPX Postback] Pago validado (TransID: ${trans_id || 'N/A'}): ${pointsAwarded} pts a usuario ${user_id}`);
-    } else if (statusNum === 2) {
-      // Estado 2: Reversión / Contracargo / Cancelación de transacción
+    } else if (statusNum === 2 && pointsAwarded > 0) {
       await client.query('UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2', [pointsAwarded, user_id]);
-      console.log(`⚠️ [CPX Postback] Reversión ejecutada (TransID: ${trans_id || 'N/A'}): ${pointsAwarded} pts retirados al usuario ${user_id}`);
     }
 
     await client.query('COMMIT');
@@ -395,14 +314,38 @@ app.get('/api/v1/cpx/postback', async (req, res) => {
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error("❌ Error en Postback CPX Research:", err);
+    console.error("❌ Error en Postback CPX:", err);
     return res.status(500).send('Internal Server Error');
   } finally {
     client.release();
   }
 });
 
-// --- RUTAS DE RETIRO ---
+// --- POSTBACK MONETAG S2S ---
+
+app.get('/api/v1/monetag/postback', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { sub1, reward, points, secret } = req.query;
+    if (secret !== POSTBACK_SECRET) return res.status(403).send('Unauthorized');
+    if (!sub1) return res.status(400).send('Missing sub1');
+
+    const pointsAwarded = Math.max(1, parseInt(points || reward || 10, 10));
+
+    await client.query('BEGIN');
+    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, sub1]);
+    await client.query('COMMIT');
+
+    return res.status(200).send('OK');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    return res.status(500).send('Error');
+  } finally {
+    client.release();
+  }
+});
+
+// --- SOLICITUD DE RETIROS ---
 
 app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
   const client = await pool.connect();
@@ -412,7 +355,7 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
     const numAmount = parseFloat(amount);
 
     if (!withdrawalMethod || !account_details || isNaN(numAmount) || numAmount < 5.0) {
-      return res.status(400).json({ error: 'Datos de retiro inválidos. Mínimo $5.00 USD.' });
+      return res.status(400).json({ error: 'Retiro inválido. Mínimo $5.00 USD.' });
     }
 
     const requiredPoints = Math.ceil(numAmount * 1000);
@@ -420,25 +363,22 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
     const currentPoints = parseInt(userRes.rows[0]?.points_balance || 0, 10);
 
     if (currentPoints < requiredPoints) {
-      return res.status(400).json({ error: `Puntos insuficientes. Requiere ${requiredPoints} pts.` });
+      return res.status(400).json({ error: `Saldo insuficiente. Necesitas ${requiredPoints} pts.` });
     }
-
-    const withdrawId = uuidv4();
 
     await client.query('BEGIN');
     await client.query('UPDATE users SET points_balance = points_balance - $1 WHERE id = $2', [requiredPoints, req.user.id]);
     await client.query(
       `INSERT INTO withdrawals (id, user_id, method, account_details, amount, points_deducted)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [withdrawId, req.user.id, withdrawalMethod, account_details, numAmount, requiredPoints]
+      [uuidv4(), req.user.id, withdrawalMethod, account_details, numAmount, requiredPoints]
     );
     await client.query('COMMIT');
 
-    res.json({ message: 'Solicitud enviada correctamente.', withdrawalId: withdrawId });
+    res.json({ message: 'Solicitud de retiro procesada correctamente.' });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error("❌ Error en retiro:", err);
-    res.status(500).json({ error: 'Error al procesar el retiro.' });
+    res.status(500).json({ error: 'Error interno en retiro.' });
   } finally {
     client.release();
   }
