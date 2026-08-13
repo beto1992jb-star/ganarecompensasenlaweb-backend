@@ -136,7 +136,8 @@ app.get('/', (req, res) => {
       startAd: 'POST /api/v1/ad/start',
       postbackMonetag: 'GET /api/v1/monetag/postback',
       postbackCPX: 'GET /api/v1/cpx/postback',
-      withdraw: 'POST /api/v1/withdraw/request'
+      withdraw: 'POST /api/v1/withdraw/request',
+      videoReward: 'POST /api/v1/video/reward'
     }
   });
 });
@@ -230,6 +231,43 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
     res.json({ user: formatUser(result.rows[0]) });
   } catch (err) {
     res.status(500).json({ error: 'Error al consultar perfil.' });
+  }
+});
+
+// --- RUTA DE RECOMPENSA DE VIDEO DIRECTO ---
+
+app.post('/api/v1/video/reward', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const pointsAwarded = 15; // Puntos otorgados por ver el video
+
+    await client.query('BEGIN');
+    
+    const userCheck = await client.query('SELECT id, referred_by FROM users WHERE id = $1', [req.user.id]);
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, req.user.id]);
+
+    const referrerId = userCheck.rows[0].referred_by;
+    if (referrerId) {
+      const commisionPoints = Math.floor(pointsAwarded * 0.03);
+      if (commisionPoints > 0) {
+        await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, referrerId]);
+      }
+    }
+
+    await client.query('COMMIT');
+    return res.json({ message: `¡Felicidades! Ganaste ${pointsAwarded} puntos por ver el video.` });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error("❌ Error al otorgar recompensa de video:", err);
+    return res.status(500).json({ error: 'Error al procesar recompensa del video.' });
+  } finally {
+    client.release();
   }
 });
 
@@ -386,7 +424,7 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
     const withdrawId = uuidv4();
 
     await client.query('BEGIN');
-    await client.query('UPDATE users SET points_balance = points_balance - $1 WHERE id = $2', [requiredPoints, req.user.id]);
+    await client.query('UPDATE users SET points_balance = points_balance - $1 WHERE id = $2', [req.user.id]);
     await client.query(
       `INSERT INTO withdrawals (id, user_id, method, account_details, amount, points_deducted)
        VALUES ($1, $2, $3, $4, $5, $6)`,
