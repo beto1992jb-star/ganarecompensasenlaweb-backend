@@ -135,6 +135,7 @@ app.get('/', (req, res) => {
       profile: 'GET /api/v1/user/profile',
       startAd: 'POST /api/v1/ad/start',
       postbackMonetag: 'GET /api/v1/monetag/postback',
+      postbackCPX: 'GET /api/v1/cpx/postback',
       withdraw: 'POST /api/v1/withdraw/request'
     }
   });
@@ -234,7 +235,6 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
 
 // --- RUTAS DE ANUNCIOS MONETAG ---
 
-// Genera un SmartLink dinámico vinculando el ID del usuario como sub1
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
     const sessionId = uuidv4();
@@ -257,7 +257,6 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
 });
 
 // RECEPCIÓN DE POSTBACK S2S MONETAG
-// Monetag llamará a este endpoint cuando se confirme una conversión/interacción válida
 app.get('/api/v1/monetag/postback', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -272,17 +271,14 @@ app.get('/api/v1/monetag/postback', async (req, res) => {
 
     await client.query('BEGIN');
     
-    // Validar usuario
     const userCheck = await client.query('SELECT id, referred_by FROM users WHERE id = $1', [userId]);
     if (userCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).send('User not found');
     }
 
-    // Acreditar puntos al usuario
     await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, userId]);
 
-    // Calcular y otorgar comisión al referente
     const referrerId = userCheck.rows[0].referred_by;
     if (referrerId) {
       const commisionPoints = Math.floor(pointsAwarded * 0.03);
@@ -304,11 +300,69 @@ app.get('/api/v1/monetag/postback', async (req, res) => {
   }
 });
 
-// --- RUTAS CPX Y RETIROS ---
+// --- RUTAS CPX RESEARCH & POSTBACK ---
 
 app.get('/api/v1/cpx/survey-url', authenticateToken, (req, res) => {
   res.json({ url: `https://offers.cpx-research.com/index.php?app_id=${CPX_APP_ID}&ext_user_id=${req.user.id}` });
 });
+
+// RECEPCIÓN DE POSTBACK S2S CPX RESEARCH
+app.get('/api/v1/cpx/postback', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { user_id, points, status } = req.query;
+
+    if (!user_id) {
+      return res.status(400).send('Missing user_id');
+    }
+
+    const statusNum = parseInt(status || '1', 10);
+    const pointsAwarded = parseInt(points || '0', 10);
+
+    if (pointsAwarded <= 0) {
+      return res.status(200).send('OK');
+    }
+
+    await client.query('BEGIN');
+
+    const userCheck = await client.query('SELECT id, referred_by FROM users WHERE id = $1', [user_id]);
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).send('User not found');
+    }
+
+    if (statusNum === 1) {
+      // Sumar puntos
+      await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, user_id]);
+
+      // Comisión del 3% para el referente
+      const referrerId = userCheck.rows[0].referred_by;
+      if (referrerId) {
+        const commisionPoints = Math.floor(pointsAwarded * 0.03);
+        if (commisionPoints > 0) {
+          await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [commisionPoints, referrerId]);
+        }
+      }
+      console.log(`✅ [CPX Postback] Acreditados ${pointsAwarded} pts al usuario ${user_id}`);
+    } else if (statusNum === 2) {
+      // Reversión de puntos
+      await client.query('UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2', [pointsAwarded, user_id]);
+      console.log(`⚠️ [CPX Postback] Reversión de ${pointsAwarded} pts al usuario ${user_id}`);
+    }
+
+    await client.query('COMMIT');
+    return res.status(200).send('OK');
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error("❌ Error en Postback CPX Research:", err);
+    return res.status(500).send('Internal Server Error');
+  } finally {
+    client.release();
+  }
+});
+
+// --- RUTAS DE RETIRO ---
 
 app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
   const client = await pool.connect();
