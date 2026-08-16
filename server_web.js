@@ -16,15 +16,14 @@ const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 // Clave secreta para validar postbacks S2S
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || 'mi_secreto_postback_123';
 
-// --- CONFIGURACIÓN CORS ---
+// --- CONFIGURACIÓN CORS CORREGIDA ---
 app.use(cors({
-  origin: ['https://ganarecompensasenlaweb.netlify.app', 'http://localhost:5500', 'http://127.0.0.1:5500'],
+  origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  credentials: false
 }));
 
-app.options('*', cors());
 app.use(express.json());
 
 // 🟢 RUTA RAÍZ
@@ -186,6 +185,12 @@ app.post('/api/v1/auth/login', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: 'Error en servidor.' });
   }
+});
+
+app.post('/api/v1/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email requerido.' });
+  res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
 });
 
 app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
