@@ -62,16 +62,6 @@ async function initDb() {
     `);
 
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS video_claims (
-        id VARCHAR(36) PRIMARY KEY,
-        user_id VARCHAR(36) NOT NULL,
-        video_id VARCHAR(50) NOT NULL,
-        claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-      );
-    `);
-
-    await pool.query(`
       CREATE TABLE IF NOT EXISTS withdrawals (
         id VARCHAR(36) PRIMARY KEY,
         user_id VARCHAR(36) NOT NULL,
@@ -200,58 +190,6 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
     res.json({ user: formatUser(result.rows[0]) });
   } catch (err) {
     res.status(500).json({ error: 'Error de servidor.' });
-  }
-});
-
-// --- CATÁLOGO DE VIDEOS Y RECOMPENSAS ---
-
-app.get('/api/v1/video/list', authenticateToken, async (req, res) => {
-  const videos = [
-    { id: 'vid_01', title: 'Trailer Promocional #1', youtube_id: 'M7lc1UVf-VE', points: 15 },
-    { id: 'vid_02', title: 'Tutorial Placas y Pagos', youtube_id: 'L_LUpnjgPso', points: 20 },
-    { id: 'vid_03', title: 'Presentación de Servicios', youtube_id: 'dQw4w9WgXcQ', points: 15 }
-  ];
-  res.json(videos);
-});
-
-app.post('/api/v1/video/youtube-reward', authenticateToken, async (req, res) => {
-  const { video_id } = req.body;
-  if (!video_id) return res.status(400).json({ error: 'ID de video requerido.' });
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const checkClaim = await client.query(
-      `SELECT id FROM video_claims 
-       WHERE user_id = $1 AND video_id = $2 
-       AND claimed_at > NOW() - INTERVAL '24 hours'`,
-      [req.user.id, video_id]
-    );
-
-    if (checkClaim.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Ya has reclamado la recompensa de este video en las últimas 24 horas.' });
-    }
-
-    const pointsAwarded = 15;
-
-    await client.query(
-      'INSERT INTO video_claims (id, user_id, video_id) VALUES ($1, $2, $3)',
-      [uuidv4(), req.user.id, video_id]
-    );
-
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, req.user.id]);
-
-    await client.query('COMMIT');
-    return res.json({ message: `¡Ganaste ${pointsAwarded} puntos por ver el video!` });
-
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error("❌ Error en recompensa YouTube:", err);
-    return res.status(500).json({ error: 'Error procesando recompensa.' });
-  } finally {
-    client.release();
   }
 });
 
