@@ -11,6 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 5500;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
+const AYET_ADSLOT = process.env.AYET_ADSLOT || '28835';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 
 // Clave secreta para validar postbacks S2S
@@ -205,6 +206,52 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
     res.json({ sessionId, adUrl: `${MONETAG_DIRECT_LINK}?sub1=${req.user.id}` });
   } catch (err) {
     res.status(500).json({ error: 'Error al iniciar oferta.' });
+  }
+});
+
+// --- INTEGRACIÓN AYET-STUDIOS OFFERWALL ---
+
+app.get('/api/v1/ayet/offerwall-url', authenticateToken, async (req, res) => {
+  try {
+    const url = `https://offerwall.ayet.io/offers?adSlot=${AYET_ADSLOT}&externalIdentifier=${req.user.id}`;
+    res.json({ url });
+  } catch (error) {
+    res.status(500).json({ error: 'Error al obtener URL de AyeT-Studios.' });
+  }
+});
+
+app.get('/api/v1/ayet/postback', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { external_identifier, currency_amount, secret } = req.query;
+
+    if (secret && secret !== POSTBACK_SECRET) {
+      console.warn("⚠️ Postback AyeT rechazado: Secreto inválido.");
+      return res.status(403).send('Unauthorized');
+    }
+
+    if (!external_identifier) return res.status(400).send('Missing external_identifier');
+
+    const pointsAwarded = parseInt(currency_amount || '0', 10);
+    if (pointsAwarded <= 0) return res.status(200).send('OK');
+
+    await client.query('BEGIN');
+    const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [external_identifier]);
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).send('User not found');
+    }
+
+    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, external_identifier]);
+    await client.query('COMMIT');
+    return res.status(200).send('OK');
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error("❌ Error en Postback AyeT:", err);
+    return res.status(500).send('Internal Server Error');
+  } finally {
+    client.release();
   }
 });
 
