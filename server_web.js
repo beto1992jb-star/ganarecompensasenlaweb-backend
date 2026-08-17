@@ -68,7 +68,6 @@ async function initDb() {
       );
     `);
 
-    // Asegurar columnas para bases de datos preexistentes
     await pool.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);
       ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires BIGINT;
@@ -202,7 +201,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
 app.post('/api/v1/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Email requerido.' });
+    if (!email) return res.status(400).json({ error: 'Correo electrónico requerido.' });
 
     const cleanEmail = email.trim().toLowerCase();
     const result = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
@@ -212,7 +211,7 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
     }
 
     const resetToken = crypto.randomBytes(32).toString('hex');
-    const expires = Date.now() + 3600000; // Expira en 1 hora
+    const expires = Date.now() + 3600000; // 1 hora de validez
 
     await pool.query(
       'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE LOWER(email) = $3',
@@ -221,26 +220,32 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
 
     const resetLink = `${FRONTEND_URL}/reset-password.html?token=${resetToken}`;
 
-    if (process.env.SMTP_USER) {
-      await transporter.sendMail({
-        from: '"GanaRecompensas" <no-reply@ganarecompensasenlaweb.com>',
-        to: cleanEmail,
-        subject: 'Recuperación de Contraseña',
-        html: `
-          <h3>Recuperación de Contraseña</h3>
-          <p>Has solicitado restablecer tu contraseña. Haz clic en el enlace a continuación:</p>
-          <a href="${resetLink}" target="_blank">Restablecer Contraseña</a>
-          <p>Este enlace expirará en 1 hora.</p>
-        `
-      });
+    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+      try {
+        await transporter.sendMail({
+          from: `"GanaRecompensas" <${process.env.SMTP_USER}>`,
+          to: cleanEmail,
+          subject: 'Recuperación de Contraseña',
+          html: `
+            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+              <h2>Recuperación de Contraseña</h2>
+              <p>Has solicitado restablecer tu contraseña. Haz clic en el siguiente enlace:</p>
+              <p><a href="${resetLink}" style="background: #38bdf8; color: #000; padding: 10px 15px; text-decoration: none; border-radius: 5px; font-weight: bold;">Restablecer Contraseña</a></p>
+              <p>Este enlace expirará en 1 hora.</p>
+            </div>
+          `
+        });
+      } catch (emailErr) {
+        console.error("❌ Error al enviar email via SMTP:", emailErr);
+      }
     } else {
       console.log(`🔗 Link de recuperación generado para ${cleanEmail}: ${resetLink}`);
     }
 
-    res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
+    return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
   } catch (err) {
     console.error("❌ Error en forgot-password:", err);
-    res.status(500).json({ error: 'Error procesando solicitud.' });
+    return res.status(500).json({ error: 'Error procesando la solicitud.' });
   }
 });
 
@@ -262,12 +267,12 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(400).json({ error: 'Token de recuperación inválido.' });
+      return res.status(400).json({ error: 'El enlace de recuperación es inválido o ya fue usado.' });
     }
 
     const user = result.rows[0];
     if (Date.now() > parseInt(user.reset_token_expires, 10)) {
-      return res.status(400).json({ error: 'El token de recuperación ha expirado.' });
+      return res.status(400).json({ error: 'El enlace de recuperación ha expirado.' });
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
@@ -276,10 +281,10 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
       [hashedPassword, user.id]
     );
 
-    res.json({ message: 'Contraseña actualizada con éxito. Ya puedes iniciar sesión.' });
+    return res.json({ message: 'Contraseña actualizada con éxito. Ya puedes iniciar sesión.' });
   } catch (err) {
     console.error("❌ Error en reset-password:", err);
-    res.status(500).json({ error: 'Error al actualizar contraseña.' });
+    return res.status(500).json({ error: 'Error al actualizar la contraseña.' });
   }
 });
 
