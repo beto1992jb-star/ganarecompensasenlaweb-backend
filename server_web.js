@@ -20,12 +20,15 @@ const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 // Clave secreta global para validar Postbacks S2S
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || 'mi_secreto_postback_123';
 
+// --- CONFIGURACIÓN COMPLETA DE CORS Y PREFLIGHT ---
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
   credentials: false
 }));
+
+app.options('*', cors());
 
 app.use(express.json());
 
