@@ -13,6 +13,7 @@ const app = express();
 const PORT = process.env.PORT || 5500;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ganarecompensasenlaweb.netlify.app';
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'mi_clave_secreta_admin_123';
 
 // Configuraciones de proveedores de ofertas
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
@@ -34,8 +35,8 @@ const transporter = nodemailer.createTransport({
 // Configuración CORS
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-admin-secret'],
   credentials: false
 }));
 
@@ -132,6 +133,14 @@ function authenticateToken(req, res, next) {
   });
 }
 
+function authenticateAdmin(req, res, next) {
+  const adminSecretHeader = req.headers['x-admin-secret'];
+  if (!adminSecretHeader || adminSecretHeader !== ADMIN_SECRET) {
+    return res.status(401).json({ success: false, error: 'ADMIN_SECRET incorrecto o no autorizado.' });
+  }
+  next();
+}
+
 function formatUser(user) {
   return {
     id: user.id,
@@ -211,7 +220,7 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
     }
 
     const resetToken = crypto.randomBytes(32).toString('hex');
-    const expires = Date.now() + 3600000; // 1 hora de validez
+    const expires = Date.now() + 3600000;
 
     await pool.query(
       'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE LOWER(email) = $3',
@@ -469,6 +478,89 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: 'Error interno en retiro.' });
+  } finally {
+    client.release();
+  }
+});
+
+// --- PANEL DE ADMINISTRACIÓN ---
+
+app.get('/api/v1/admin/withdrawals', authenticateAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        w.id,
+        w.user_id,
+        u.email,
+        w.method AS payout_method,
+        w.account_details AS payout_destination,
+        w.amount AS amount_usd,
+        0 AS fee_usd,
+        w.amount AS net_amount_usd,
+        w.points_deducted,
+        w.status,
+        w.created_at
+      FROM withdrawals w
+      JOIN users u ON w.user_id = u.id
+      ORDER BY w.created_at DESC
+    `);
+
+    res.json({ success: true, withdrawals: result.rows });
+  } catch (err) {
+    console.error("❌ Error en GET admin withdrawals:", err);
+    res.status(500).json({ success: false, error: 'Error al obtener solicitudes.' });
+  }
+});
+
+app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const validStatuses = ['approved', 'rejected', 'completed', 'pending'];
+    if (!status || !validStatuses.includes(status.toLowerCase())) {
+      return res.status(400).json({ success: false, error: 'Estado no válido.' });
+    }
+
+    const newStatus = status.toLowerCase();
+
+    await client.query('BEGIN');
+
+    const currentRes = await client.query('SELECT * FROM withdrawals WHERE id = $1', [id]);
+    if (currentRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'Solicitud no encontrada.' });
+    }
+
+    const currentWithdrawal = currentRes.rows[0];
+    const prevStatus = currentWithdrawal.status.toLowerCase();
+
+    // Si pasa de un estado no rechazado a REJECTED, reembolsar los puntos al usuario
+    if (newStatus === 'rejected' && prevStatus !== 'rejected') {
+      await client.query(
+        'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
+        [currentWithdrawal.points_deducted, currentWithdrawal.user_id]
+      );
+    }
+
+    // Si estuvo REJECTED y vuelve a cambiarse a PENDING/APPROVED/COMPLETED, volver a descontar
+    if (prevStatus === 'rejected' && newStatus !== 'rejected') {
+      await client.query(
+        'UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2',
+        [currentWithdrawal.points_deducted, currentWithdrawal.user_id]
+      );
+    }
+
+    await client.query('UPDATE withdrawals SET status = $1 WHERE id = $2', [newStatus.toUpperCase(), id]);
+    await client.query('COMMIT');
+
+    res.json({ success: true, message: `Solicitud marcada como ${newStatus}.` });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error("❌ Error actualizando retiro admin:", err);
+    res.status(500).json({ success: false, error: 'Error al actualizar estado.' });
   } finally {
     client.release();
   }
