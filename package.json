@@ -2,9 +2,9 @@
   "name": "ganarecompensas-backend",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "main": "server_web.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server_web.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -12,6 +12,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^6.9.13",
     "pg": "^8.11.5",
     "uuid": "^10.0.0"
   }
