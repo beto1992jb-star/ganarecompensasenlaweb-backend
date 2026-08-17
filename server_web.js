@@ -13,7 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 
 // Configuraciones de proveedores de ofertas
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
-const AYET_APP_ID = process.env.AYET_APP_ID || '28835'; // Usar App ID para el muro iFrame
+const AYET_APP_ID = process.env.AYET_APP_ID || '28835';
 const TIMEWALL_PUB_ID = process.env.TIMEWALL_PUB_ID || 'tu_timewall_pub_id';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 
