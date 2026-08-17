@@ -3,6 +3,8 @@ import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
+import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 import { v4 as uuidv4 } from 'uuid';
 
 const { Pool } = pg;
@@ -10,16 +12,26 @@ const { Pool } = pg;
 const app = express();
 const PORT = process.env.PORT || 5500;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ganarecompensasenlaweb.netlify.app';
 
 // Configuraciones de proveedores de ofertas
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '28835';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
-
-// Clave secreta global para validar Postbacks S2S
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || 'mi_secreto_postback_123';
 
-// --- CONFIGURACIÓN COMPLETA DE CORS Y PREFLIGHT ---
+// Configuración de servicio de emails (SMTP)
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587', 10),
+  secure: process.env.SMTP_SECURE === 'true',
+  auth: {
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || ''
+  }
+});
+
+// Configuración CORS
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -28,7 +40,6 @@ app.use(cors({
 }));
 
 app.options('*', cors());
-
 app.use(express.json());
 
 app.get('/', (req, res) => {
@@ -51,8 +62,16 @@ async function initDb() {
         referral_code VARCHAR(50) UNIQUE NOT NULL,
         referred_by VARCHAR(36),
         points_balance INT DEFAULT 0,
+        reset_token VARCHAR(255),
+        reset_token_expires BIGINT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
+
+    // Asegurar columnas para bases de datos preexistentes
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires BIGINT;
     `);
 
     await pool.query(`
@@ -181,9 +200,87 @@ app.post('/api/v1/auth/login', async (req, res) => {
 });
 
 app.post('/api/v1/auth/forgot-password', async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email requerido.' });
-  res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email requerido.' });
+
+    const cleanEmail = email.trim().toLowerCase();
+    const result = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+
+    if (result.rows.length === 0) {
+      return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expires = Date.now() + 3600000; // Expira en 1 hora
+
+    await pool.query(
+      'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE LOWER(email) = $3',
+      [resetToken, expires, cleanEmail]
+    );
+
+    const resetLink = `${FRONTEND_URL}/reset-password.html?token=${resetToken}`;
+
+    if (process.env.SMTP_USER) {
+      await transporter.sendMail({
+        from: '"GanaRecompensas" <no-reply@ganarecompensasenlaweb.com>',
+        to: cleanEmail,
+        subject: 'Recuperación de Contraseña',
+        html: `
+          <h3>Recuperación de Contraseña</h3>
+          <p>Has solicitado restablecer tu contraseña. Haz clic en el enlace a continuación:</p>
+          <a href="${resetLink}" target="_blank">Restablecer Contraseña</a>
+          <p>Este enlace expirará en 1 hora.</p>
+        `
+      });
+    } else {
+      console.log(`🔗 Link de recuperación generado para ${cleanEmail}: ${resetLink}`);
+    }
+
+    res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
+  } catch (err) {
+    console.error("❌ Error en forgot-password:", err);
+    res.status(500).json({ error: 'Error procesando solicitud.' });
+  }
+});
+
+app.post('/api/v1/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'Token y nueva contraseña requeridos.' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+    }
+
+    const result = await pool.query(
+      'SELECT id, reset_token_expires FROM users WHERE reset_token = $1',
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Token de recuperación inválido.' });
+    }
+
+    const user = result.rows[0];
+    if (Date.now() > parseInt(user.reset_token_expires, 10)) {
+      return res.status(400).json({ error: 'El token de recuperación ha expirado.' });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
+      [hashedPassword, user.id]
+    );
+
+    res.json({ message: 'Contraseña actualizada con éxito. Ya puedes iniciar sesión.' });
+  } catch (err) {
+    console.error("❌ Error en reset-password:", err);
+    res.status(500).json({ error: 'Error al actualizar contraseña.' });
+  }
 });
 
 app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
