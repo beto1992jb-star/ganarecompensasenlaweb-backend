@@ -14,7 +14,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 // Configuraciones de proveedores de ofertas
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '28835';
-const TIMEWALL_PUB_ID = process.env.TIMEWALL_PUB_ID || 'tu_timewall_pub_id';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 
 // Clave secreta global para validar Postbacks S2S
@@ -252,52 +251,6 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error("❌ Error en Postback AyeT:", err);
-    return res.status(500).send('Internal Server Error');
-  } finally {
-    client.release();
-  }
-});
-
-// --- INTEGRACIÓN TIMEWALL ---
-
-app.get('/api/v1/timewall/wall-url', authenticateToken, async (req, res) => {
-  try {
-    const url = `https://timewall.io/offers?pub_id=${TIMEWALL_PUB_ID}&user_id=${req.user.id}`;
-    res.json({ url });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al obtener URL de TimeWall.' });
-  }
-});
-
-app.get('/api/v1/timewall/postback', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { user_id, payout, secret } = req.query;
-
-    if (secret && secret !== POSTBACK_SECRET) {
-      console.warn("⚠️ Postback TimeWall rechazado: Secreto inválido.");
-      return res.status(403).send('Unauthorized');
-    }
-
-    if (!user_id) return res.status(400).send('Missing user_id');
-
-    const pointsAwarded = parseInt(payout || '0', 10);
-    if (pointsAwarded <= 0) return res.status(200).send('OK');
-
-    await client.query('BEGIN');
-    const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [user_id]);
-    if (userCheck.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).send('User not found');
-    }
-
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, user_id]);
-    await client.query('COMMIT');
-    return res.status(200).send('OK');
-
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error("❌ Error en Postback TimeWall:", err);
     return res.status(500).send('Internal Server Error');
   } finally {
     client.release();
