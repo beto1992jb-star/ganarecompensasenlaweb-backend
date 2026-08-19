@@ -65,13 +65,9 @@ async function initDb() {
         points_balance INT DEFAULT 0,
         reset_token VARCHAR(255),
         reset_token_expires BIGINT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(referred_by) REFERENCES users(id) ON DELETE SET NULL
       );
-    `);
-
-    await pool.query(`
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires BIGINT;
     `);
 
     await pool.query(`
@@ -90,7 +86,7 @@ async function initDb() {
         user_id VARCHAR(36) NOT NULL,
         method VARCHAR(50) NOT NULL,
         account_details VARCHAR(255) NOT NULL,
-        amount NUMERIC(10,2) NOT NULL,
+        amount NUMERIC(10,2) NOT NULL CHECK (amount >= 5.00),
         points_deducted INT NOT NULL,
         status VARCHAR(20) DEFAULT 'PENDING',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -98,7 +94,7 @@ async function initDb() {
       );
     `);
 
-    console.log("✅ Base de datos inicializada.");
+    console.log("✅ Base de datos inicializada correctamente (3 tablas activas).");
   } catch (err) {
     console.error("❌ Error en DB:", err);
   }
@@ -536,7 +532,6 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
     const currentWithdrawal = currentRes.rows[0];
     const prevStatus = currentWithdrawal.status.toLowerCase();
 
-    // Si pasa de un estado no rechazado a REJECTED, reembolsar los puntos al usuario
     if (newStatus === 'rejected' && prevStatus !== 'rejected') {
       await client.query(
         'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
@@ -544,7 +539,6 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
       );
     }
 
-    // Si estuvo REJECTED y vuelve a cambiarse a PENDING/APPROVED/COMPLETED, volver a descontar
     if (prevStatus === 'rejected' && newStatus !== 'rejected') {
       await client.query(
         'UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2',
