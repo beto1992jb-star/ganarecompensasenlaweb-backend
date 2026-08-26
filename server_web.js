@@ -233,8 +233,7 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
           subject: 'Recuperación de Contraseña',
           html: `
             <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-              <h2>Recuperación de Contraseña</h2>
-              <p>Has solicitado restablecer tu contraseña. Haz clic en el siguiente enlace:</p>
+              2. Haz clic en el siguiente enlace para cambiar tu contraseña:</p>
               <p><a href="${resetLink}" style="background: #38bdf8; color: #000; padding: 10px 15px; text-decoration: none; border-radius: 5px; font-weight: bold;">Restablecer Contraseña</a></p>
               <p>Este enlace expirará en 1 hora.</p>
             </div>
@@ -254,39 +253,59 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
   }
 });
 
+// Ruta de actualización de contraseña modificada (permite token o username/email directo)
 app.post('/api/v1/auth/reset-password', async (req, res) => {
   try {
-    const { token, newPassword } = req.body;
+    const { token, username, email, newPassword } = req.body;
+    const userIdentifier = (username || email || '').trim().toLowerCase();
 
-    if (!token || !newPassword) {
-      return res.status(400).json({ error: 'Token y nueva contraseña requeridos.' });
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres.' });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres.' });
+    let targetUserId = null;
+
+    // 1. Búsqueda si se proporciona un Token
+    if (token) {
+      const result = await pool.query(
+        'SELECT id, reset_token_expires FROM users WHERE reset_token = $1',
+        [token]
+      );
+
+      if (result.rows.length > 0) {
+        const user = result.rows[0];
+        if (Date.now() <= parseInt(user.reset_token_expires, 10)) {
+          targetUserId = user.id;
+        } else {
+          return res.status(400).json({ error: 'El enlace de recuperación ha expirado.' });
+        }
+      }
     }
 
-    const result = await pool.query(
-      'SELECT id, reset_token_expires FROM users WHERE reset_token = $1',
-      [token]
-    );
+    // 2. Búsqueda por Usuario/Correo si no se especificó o no se encontró por token
+    if (!targetUserId && userIdentifier) {
+      const userRes = await pool.query(
+        'SELECT id FROM users WHERE LOWER(email) = $1',
+        [userIdentifier]
+      );
 
-    if (result.rows.length === 0) {
-      return res.status(400).json({ error: 'El enlace de recuperación es inválido o ya fue usado.' });
+      if (userRes.rows.length > 0) {
+        targetUserId = userRes.rows[0].id;
+      }
     }
 
-    const user = result.rows[0];
-    if (Date.now() > parseInt(user.reset_token_expires, 10)) {
-      return res.status(400).json({ error: 'El enlace de recuperación ha expirado.' });
+    if (!targetUserId) {
+      return res.status(400).json({ error: 'Usuario no encontrado o token inválido.' });
     }
 
+    // 3. Actualización de la contraseña
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     await pool.query(
       'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
-      [hashedPassword, user.id]
+      [hashedPassword, targetUserId]
     );
 
-    return res.json({ message: 'Contraseña actualizada con éxito. Ya puedes iniciar sesión.' });
+    return res.json({ message: 'Contraseña actualizada con éxito.' });
   } catch (err) {
     console.error("❌ Error en reset-password:", err);
     return res.status(500).json({ error: 'Error al actualizar la contraseña.' });
