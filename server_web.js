@@ -233,7 +233,7 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
           subject: 'Recuperación de Contraseña',
           html: `
             <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-              2. Haz clic en el siguiente enlace para cambiar tu contraseña:</p>
+              <p>Haz clic en el siguiente enlace para cambiar tu contraseña:</p>
               <p><a href="${resetLink}" style="background: #38bdf8; color: #000; padding: 10px 15px; text-decoration: none; border-radius: 5px; font-weight: bold;">Restablecer Contraseña</a></p>
               <p>Este enlace expirará en 1 hora.</p>
             </div>
@@ -253,7 +253,7 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
   }
 });
 
-// Ruta de actualización de contraseña modificada (permite token o username/email directo)
+// Ruta de actualización de contraseña
 app.post('/api/v1/auth/reset-password', async (req, res) => {
   try {
     const { token, username, email, newPassword } = req.body;
@@ -265,7 +265,6 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
 
     let targetUserId = null;
 
-    // 1. Búsqueda si se proporciona un Token
     if (token) {
       const result = await pool.query(
         'SELECT id, reset_token_expires FROM users WHERE reset_token = $1',
@@ -282,7 +281,6 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
       }
     }
 
-    // 2. Búsqueda por Usuario/Correo si no se especificó o no se encontró por token
     if (!targetUserId && userIdentifier) {
       const userRes = await pool.query(
         'SELECT id FROM users WHERE LOWER(email) = $1',
@@ -298,7 +296,6 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Usuario no encontrado o token inválido.' });
     }
 
-    // 3. Actualización de la contraseña
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     await pool.query(
       'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
