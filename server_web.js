@@ -17,7 +17,7 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || 'mi_clave_secreta_admin_123';
 
 // Configuraciones de proveedores de ofertas
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
-const AYET_APP_ID = process.env.AYET_APP_ID || '28835';
+const AYET_APP_ID = process.env.AYET_APP_ID || '24629';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || 'mi_secreto_postback_123';
 
@@ -338,7 +338,8 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
 
 app.get('/api/v1/ayet/offerwall-url', authenticateToken, async (req, res) => {
   try {
-    const url = `https://wall.ayetstudios.com/offers/${AYET_APP_ID}?subid=${req.user.id}`;
+    const adSlot = process.env.AYET_APP_ID || AYET_APP_ID;
+    const url = `https://offerwall.ayet.io/offers?adSlot=${adSlot}&externalIdentifier=${req.user.id}`;
     res.json({ url });
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener URL de AyeT-Studios.' });
@@ -348,26 +349,27 @@ app.get('/api/v1/ayet/offerwall-url', authenticateToken, async (req, res) => {
 app.get('/api/v1/ayet/postback', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { subid, currency_amount, secret } = req.query;
+    const { subid, external_identifier, currency_amount, points, secret } = req.query;
+    const userId = external_identifier || subid;
+    const pointsAwarded = parseInt(currency_amount || points || '0', 10);
 
     if (secret && secret !== POSTBACK_SECRET) {
       console.warn("⚠️ Postback AyeT rechazado: Secreto inválido.");
       return res.status(403).send('Unauthorized');
     }
 
-    if (!subid) return res.status(400).send('Missing subid');
+    if (!userId) return res.status(400).send('Missing user identifier');
 
-    const pointsAwarded = parseInt(currency_amount || '0', 10);
     if (pointsAwarded <= 0) return res.status(200).send('OK');
 
     await client.query('BEGIN');
-    const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [subid]);
+    const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [userId]);
     if (userCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).send('User not found');
     }
 
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, subid]);
+    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, userId]);
     await client.query('COMMIT');
     return res.status(200).send('OK');
 
