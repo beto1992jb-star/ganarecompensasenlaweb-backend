@@ -393,20 +393,15 @@ app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
   }
 });
 
-app.get('/api/v1/cpx/postback', async (req, res) => {
+app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
   const client = await pool.connect();
   try {
-    const { user_id, points, status, secret } = req.query;
-
-    if (secret !== POSTBACK_SECRET) {
-      console.warn("⚠️ Postback CPX rechazado: Secreto inválido.");
-      return res.status(403).send('Unauthorized');
-    }
+    const { user_id, amount_local, points, status } = req.query;
 
     if (!user_id) return res.status(400).send('Missing user_id');
 
     const statusNum = parseInt(status || '1', 10);
-    const pointsAwarded = parseInt(points || '0', 10);
+    const pointsAwarded = parseInt(amount_local || points || '0', 10);
 
     await client.query('BEGIN');
 
