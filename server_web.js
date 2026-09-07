@@ -19,7 +19,7 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || 'mi_clave_secreta_admin_123';
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '24629';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
-const POSTBACK_SECRET = process.env.POSTBACK_SECRET || 'mi_secreto_postback_123';
+const POSTBACK_SECRET = process.env.POSTBACK_SECRET || process.env.CPX_HASH_SECRET || 'n11j9vl7ohWifImg2bIP9hkB7iF5GITm';
 
 // Configuración de servicio de emails (SMTP)
 const transporter = nodemailer.createTransport({
@@ -396,7 +396,15 @@ app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
 app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
   const client = await pool.connect();
   try {
-    const { user_id, amount_local, points, status } = req.query;
+    const { user_id, amount_local, points, status, secret } = req.query;
+
+    const expectedSecret = process.env.POSTBACK_SECRET || process.env.CPX_HASH_SECRET || 'n11j9vl7ohWifImg2bIP9hkB7iF5GITm';
+
+    // Validar secreto de seguridad
+    if (secret !== expectedSecret) {
+      console.warn("⚠️ Postback CPX rechazado: Secreto inválido.");
+      return res.status(403).send('Unauthorized');
+    }
 
     if (!user_id) return res.status(400).send('Missing user_id');
 
