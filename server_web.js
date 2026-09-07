@@ -365,13 +365,15 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
     if (pointsAwarded <= 0) return res.status(200).send('OK');
 
     await client.query('BEGIN');
-    const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [userId]);
+    const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [userId]);
     if (userCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).send('User not found');
     }
 
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, userId]);
+    const actualUserId = userCheck.rows[0].id;
+
+    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
     await client.query('COMMIT');
     return res.status(200).send('OK');
 
@@ -388,6 +390,7 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
 
 app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
   try {
+    // Se envía req.user.id en ext_user_id para asegurar compatibilidad directa por UUID
     const url = `https://offers.cpx-research.com/index.php?app_id=${CPX_APP_ID}&ext_user_id=${req.user.id}&username=${encodeURIComponent(req.user.email)}`;
     res.json({ url });
   } catch (error) {
@@ -415,16 +418,23 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
 
     await client.query('BEGIN');
 
-    const userCheck = await client.query('SELECT id FROM users WHERE id = $1', [user_id]);
+    // Buscar por ID o por Email en caso de que CPX pase el email en user_id
+    const userCheck = await client.query(
+      'SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)',
+      [user_id]
+    );
+
     if (userCheck.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).send('User not found');
     }
 
+    const actualUserId = userCheck.rows[0].id;
+
     if (statusNum === 1 && pointsAwarded > 0) {
-      await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, user_id]);
+      await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
     } else if (statusNum === 2 && pointsAwarded > 0) {
-      await client.query('UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2', [pointsAwarded, user_id]);
+      await client.query('UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2', [pointsAwarded, actualUserId]);
     }
 
     await client.query('COMMIT');
@@ -451,7 +461,16 @@ app.get('/api/v1/monetag/postback', async (req, res) => {
     const pointsAwarded = Math.max(1, parseInt(points || reward || 10, 10));
 
     await client.query('BEGIN');
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, sub1]);
+
+    const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [sub1]);
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).send('User not found');
+    }
+
+    const actualUserId = userCheck.rows[0].id;
+
+    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
     await client.query('COMMIT');
 
     return res.status(200).send('OK');
