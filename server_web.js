@@ -330,6 +330,10 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
       'INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)',
       [sessionId, req.user.id, Date.now()]
     );
+    await pool.query(
+      'UPDATE users SET points_balance = points_balance + 1 WHERE id = $1',
+      [req.user.id]
+    );
     res.json({ sessionId, adUrl: `${MONETAG_DIRECT_LINK}?sub1=${req.user.id}` });
   } catch (err) {
     res.status(500).json({ error: 'Error al iniciar oferta.' });
