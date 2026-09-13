@@ -20,7 +20,7 @@ const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '24629';
 const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
 
-// Carga de clave secreta desde variables de entorno
+// Clave secreta para postbacks
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || process.env.CPX_HASH_SECRET;
 
 // Configuración de servicio de emails (SMTP)
@@ -96,12 +96,14 @@ async function initDb() {
       );
     `);
 
-    console.log("✅ Base de datos inicializada correctamente (3 tablas activas).");
+    console.log("✅ Base de datos inicializada correctamente.");
   } catch (err) {
-    console.error("❌ Error en DB:", err);
+    console.error("❌ Error en inicialización de DB:", err);
   }
 }
 initDb();
+
+// --- HELPERS Y MIDDLEWARES ---
 
 async function generateUniqueReferralCode() {
   let isUnique = false;
@@ -255,7 +257,6 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
   }
 });
 
-// Ruta de actualización de contraseña
 app.post('/api/v1/auth/reset-password', async (req, res) => {
   try {
     const { token, username, email, newPassword } = req.body;
@@ -284,11 +285,7 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
     }
 
     if (!targetUserId && userIdentifier) {
-      const userRes = await pool.query(
-        'SELECT id FROM users WHERE LOWER(email) = $1',
-        [userIdentifier]
-      );
-
+      const userRes = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [userIdentifier]);
       if (userRes.rows.length > 0) {
         targetUserId = userRes.rows[0].id;
       }
@@ -359,13 +356,12 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
     const userId = external_identifier || subid;
     const pointsAwarded = parseInt(currency_amount || points || '0', 10);
 
-    if (secret && secret !== POSTBACK_SECRET) {
+    if (POSTBACK_SECRET && secret !== POSTBACK_SECRET) {
       console.warn("⚠️ Postback AyeT rechazado: Secreto inválido.");
       return res.status(403).send('Unauthorized');
     }
 
     if (!userId) return res.status(400).send('Missing user identifier');
-
     if (pointsAwarded <= 0) return res.status(200).send('OK');
 
     await client.query('BEGIN');
@@ -376,7 +372,6 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
     }
 
     const actualUserId = userCheck.rows[0].id;
-
     await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
     await client.query('COMMIT');
     return res.status(200).send('OK');
@@ -394,7 +389,6 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
 
 app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
   try {
-    // Se envía req.user.id en ext_user_id para asegurar compatibilidad directa por UUID
     const url = `https://offers.cpx-research.com/index.php?app_id=${CPX_APP_ID}&ext_user_id=${req.user.id}&username=${encodeURIComponent(req.user.email)}`;
     res.json({ url });
   } catch (error) {
@@ -406,11 +400,9 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
   const client = await pool.connect();
   try {
     const { user_id, amount_local, points, status, secret } = req.query;
+    const expectedSecret = process.env.CPX_HASH_SECRET || POSTBACK_SECRET;
 
-    const expectedSecret = process.env.CPX_HASH_SECRET || process.env.POSTBACK_SECRET;
-
-    // Validar secreto de seguridad
-    if (secret !== expectedSecret) {
+    if (expectedSecret && secret !== expectedSecret) {
       console.warn("⚠️ Postback CPX rechazado: Secreto inválido.");
       return res.status(403).send('Unauthorized');
     }
@@ -422,7 +414,6 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Buscar por ID o por Email en caso de que CPX pase el email en user_id
     const userCheck = await client.query(
       'SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)',
       [user_id]
@@ -459,7 +450,7 @@ app.get('/api/v1/monetag/postback', async (req, res) => {
   const client = await pool.connect();
   try {
     const { sub1, reward, points, secret } = req.query;
-    if (secret !== POSTBACK_SECRET) return res.status(403).send('Unauthorized');
+    if (POSTBACK_SECRET && secret !== POSTBACK_SECRET) return res.status(403).send('Unauthorized');
     if (!sub1) return res.status(400).send('Missing sub1');
 
     const pointsAwarded = Math.max(1, parseInt(points || reward || 10, 10));
@@ -578,6 +569,7 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
     const currentWithdrawal = currentRes.rows[0];
     const prevStatus = currentWithdrawal.status.toLowerCase();
 
+    // Reembolsar si se rechaza
     if (newStatus === 'rejected' && prevStatus !== 'rejected') {
       await client.query(
         'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
@@ -585,6 +577,7 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
       );
     }
 
+    // Volver a descontar si antes estaba rechazado y cambia a aprobada/pendiente
     if (prevStatus === 'rejected' && newStatus !== 'rejected') {
       await client.query(
         'UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2',
@@ -607,5 +600,5 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor activo en el puerto ${PORT}`);
+  console.log(`🚀 Servidor activo en el puerto ${PORT}`);
 });
