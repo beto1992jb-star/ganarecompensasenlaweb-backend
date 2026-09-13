@@ -64,7 +64,7 @@ async function initDb() {
         password VARCHAR(255) NOT NULL,
         referral_code VARCHAR(50) UNIQUE NOT NULL,
         referred_by VARCHAR(36),
-        points_balance INT DEFAULT 0,
+        points_balance NUMERIC(10,2) DEFAULT 0.00,
         reset_token VARCHAR(255),
         reset_token_expires BIGINT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -143,7 +143,7 @@ function formatUser(user) {
   return {
     id: user.id,
     email: user.email,
-    points_balance: parseInt(user.points_balance || 0, 10),
+    points_balance: parseFloat(user.points_balance || 0),
     referral_code: user.referral_code
   };
 }
@@ -331,7 +331,7 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
       [sessionId, req.user.id, Date.now()]
     );
     await pool.query(
-      'UPDATE users SET points_balance = points_balance + 1 WHERE id = $1',
+      'UPDATE users SET points_balance = points_balance + 0.7 WHERE id = $1',
       [req.user.id]
     );
     res.json({ sessionId, adUrl: `${MONETAG_DIRECT_LINK}?sub1=${req.user.id}` });
@@ -501,7 +501,7 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
 
     const requiredPoints = Math.ceil(numAmount * 1000);
     const userRes = await client.query('SELECT points_balance FROM users WHERE id = $1', [req.user.id]);
-    const currentPoints = parseInt(userRes.rows[0]?.points_balance || 0, 10);
+    const currentPoints = parseFloat(userRes.rows[0]?.points_balance || 0);
 
     if (currentPoints < requiredPoints) {
       return res.status(400).json({ error: `Saldo insuficiente. Necesitas ${requiredPoints} pts.` });
