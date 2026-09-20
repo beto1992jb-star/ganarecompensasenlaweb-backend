@@ -18,7 +18,7 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || 'mi_clave_secreta_admin_123';
 // Configuraciones de proveedores de ofertas
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '24629';
-const MONETAG_DIRECT_LINK = 'https://omg10.com/4/11538152';
+const DIRECT_LINK_URL = process.env.DIRECT_LINK_URL || 'https://omg10.com/4/11538152';
 
 // Clave secreta para postbacks
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || process.env.CPX_HASH_SECRET;
@@ -318,7 +318,7 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// --- OFERTAS Y ANUNCIOS ---
+// --- OFERTAS Y DIRECT LINK ---
 
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
@@ -328,10 +328,10 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
       [sessionId, req.user.id, Date.now()]
     );
     await pool.query(
-      'UPDATE users SET points_balance = points_balance + 0.7 WHERE id = $1',
+      'UPDATE users SET points_balance = points_balance + 1.00 WHERE id = $1',
       [req.user.id]
     );
-    res.json({ sessionId, adUrl: `${MONETAG_DIRECT_LINK}?sub1=${req.user.id}` });
+    res.json({ sessionId, adUrl: `${DIRECT_LINK_URL}?sub1=${req.user.id}` });
   } catch (err) {
     res.status(500).json({ error: 'Error al iniciar oferta.' });
   }
@@ -439,39 +439,6 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
     await client.query('ROLLBACK');
     console.error("❌ Error en Postback CPX:", err);
     return res.status(500).send('Internal Server Error');
-  } finally {
-    client.release();
-  }
-});
-
-// --- POSTBACK MONETAG S2S ---
-
-app.get('/api/v1/monetag/postback', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { sub1, reward, points, secret } = req.query;
-    if (POSTBACK_SECRET && secret !== POSTBACK_SECRET) return res.status(403).send('Unauthorized');
-    if (!sub1) return res.status(400).send('Missing sub1');
-
-    const pointsAwarded = Math.max(1, parseInt(points || reward || 10, 10));
-
-    await client.query('BEGIN');
-
-    const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [sub1]);
-    if (userCheck.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).send('User not found');
-    }
-
-    const actualUserId = userCheck.rows[0].id;
-
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
-    await client.query('COMMIT');
-
-    return res.status(200).send('OK');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    return res.status(500).send('Error');
   } finally {
     client.release();
   }
