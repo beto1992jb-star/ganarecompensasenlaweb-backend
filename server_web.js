@@ -536,7 +536,6 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
     const currentWithdrawal = currentRes.rows[0];
     const prevStatus = currentWithdrawal.status.toLowerCase();
 
-    // Reembolsar si se rechaza
     if (newStatus === 'rejected' && prevStatus !== 'rejected') {
       await client.query(
         'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
@@ -544,7 +543,6 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
       );
     }
 
-    // Volver a descontar si antes estaba rechazado y cambia a aprobada/pendiente
     if (prevStatus === 'rejected' && newStatus !== 'rejected') {
       await client.query(
         'UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2',
