@@ -15,15 +15,12 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ganarecompensasenlaweb.netlify.app';
 const ADMIN_SECRET = process.env.ADMIN_SECRET || 'mi_clave_secreta_admin_123';
 
-// Configuraciones de proveedores de ofertas
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '24629';
 const DIRECT_LINK_URL = process.env.DIRECT_LINK_URL || 'https://omg10.com/4/11538152';
 
-// Clave secreta para postbacks
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || process.env.CPX_HASH_SECRET;
 
-// Configuración de servicio de emails (SMTP)
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
   port: parseInt(process.env.SMTP_PORT || '587', 10),
@@ -34,7 +31,6 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Configuración CORS
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -49,7 +45,6 @@ app.get('/', (req, res) => {
   res.status(200).send('API de GanaRecompensasEnLaWeb funcionando correctamente 🚀');
 });
 
-// --- BASE DE DATOS (PostgreSQL) ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/ganarecompensas',
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
@@ -104,8 +99,6 @@ async function initDb() {
 }
 initDb();
 
-// --- HELPERS Y MIDDLEWARES ---
-
 async function generateUniqueReferralCode() {
   let isUnique = false;
   let code = '';
@@ -151,8 +144,6 @@ function formatUser(user) {
     arcade_level: parseInt(user.arcade_level || 1, 10)
   };
 }
-
-// --- RUTAS DE AUTENTICACIÓN ---
 
 app.post('/api/v1/auth/register', async (req, res) => {
   try {
@@ -320,8 +311,6 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// --- OFERTAS, DIRECT LINK Y PUNTOS PERSONALIZADOS ---
-
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
     const sessionId = uuidv4();
@@ -340,8 +329,6 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Error al iniciar oferta.' });
   }
 });
-
-// --- ACTUALIZAR Y REPORTAR NIVEL ARCADE ---
 
 app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
   try {
@@ -363,8 +350,6 @@ app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Error en servidor.' });
   }
 });
-
-// --- LEADERBOARD TOP 10 EN TIEMPO REAL ---
 
 app.get('/api/v1/leaderboard', async (req, res) => {
   try {
@@ -394,8 +379,6 @@ app.get('/api/v1/leaderboard', async (req, res) => {
     res.status(500).json({ success: false, error: 'Error al obtener ranking.' });
   }
 });
-
-// --- INTEGRACIÓN AYET-STUDIOS OFFERWALL ---
 
 app.get('/api/v1/ayet/offerwall-url', authenticateToken, async (req, res) => {
   try {
@@ -440,8 +423,6 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
     client.release();
   }
 });
-
-// --- INTEGRACIÓN CPX RESEARCH ---
 
 app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
   try {
@@ -494,8 +475,6 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
   }
 });
 
-// --- SOLICITUD DE RETIROS ---
-
 app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -532,8 +511,6 @@ app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
     client.release();
   }
 });
-
-// --- PANEL DE ADMINISTRACIÓN ---
 
 app.get('/api/v1/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
