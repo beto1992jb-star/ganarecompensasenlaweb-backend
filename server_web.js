@@ -65,6 +65,7 @@ async function initDb() {
         referral_code VARCHAR(50) UNIQUE NOT NULL,
         referred_by VARCHAR(36),
         points_balance NUMERIC(10,2) DEFAULT 0.00,
+        arcade_level INT DEFAULT 1,
         reset_token VARCHAR(255),
         reset_token_expires BIGINT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -146,7 +147,8 @@ function formatUser(user) {
     id: user.id,
     email: user.email,
     points_balance: parseFloat(user.points_balance || 0),
-    referral_code: user.referral_code
+    referral_code: user.referral_code,
+    arcade_level: parseInt(user.arcade_level || 1, 10)
   };
 }
 
@@ -172,8 +174,8 @@ app.post('/api/v1/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const insertResult = await pool.query(
-      `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance)
-       VALUES ($1, $2, $3, $4, $5, 0) RETURNING *`,
+      `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance, arcade_level)
+       VALUES ($1, $2, $3, $4, $5, 0, 1) RETURNING *`,
       [userId, cleanEmail, hashedPassword, myReferralCode, referredByUserId]
     );
 
@@ -318,22 +320,78 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// --- OFERTAS Y DIRECT LINK ---
+// --- OFERTAS, DIRECT LINK Y PUNTOS PERSONALIZADOS ---
 
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
     const sessionId = uuidv4();
+    const pointsToAdd = parseFloat(req.body.points || 1.00);
+
     await pool.query(
       'INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)',
       [sessionId, req.user.id, Date.now()]
     );
     await pool.query(
-      'UPDATE users SET points_balance = points_balance + 1.00 WHERE id = $1',
-      [req.user.id]
+      'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
+      [pointsToAdd, req.user.id]
     );
     res.json({ sessionId, adUrl: `${DIRECT_LINK_URL}?sub1=${req.user.id}` });
   } catch (err) {
     res.status(500).json({ error: 'Error al iniciar oferta.' });
+  }
+});
+
+// --- ACTUALIZAR Y REPORTAR NIVEL ARCADE ---
+
+app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
+  try {
+    const { level } = req.body;
+    const newLevel = parseInt(level, 10);
+
+    if (isNaN(newLevel) || newLevel < 1) {
+      return res.status(400).json({ error: 'Nivel inválido.' });
+    }
+
+    await pool.query(
+      'UPDATE users SET arcade_level = GREATEST(COALESCE(arcade_level, 1), $1) WHERE id = $2',
+      [newLevel, req.user.id]
+    );
+
+    res.json({ success: true, message: 'Nivel de arcade sincronizado.' });
+  } catch (err) {
+    console.error("❌ Error actualizando nivel arcade:", err);
+    res.status(500).json({ error: 'Error en servidor.' });
+  }
+});
+
+// --- LEADERBOARD TOP 10 EN TIEMPO REAL ---
+
+app.get('/api/v1/leaderboard', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT email, arcade_level 
+      FROM users 
+      ORDER BY arcade_level DESC, created_at ASC 
+      LIMIT 10
+    `);
+
+    const leaderboard = result.rows.map((row, index) => {
+      const emailParts = row.email.split('@');
+      const name = emailParts[0];
+      const maskedName = name.length > 3 ? name.substring(0, 4) + '****' : name + '***';
+      const maskedEmail = `${maskedName}@${emailParts[1]}`;
+
+      return {
+        position: index + 1,
+        email: maskedEmail,
+        level: row.arcade_level || 1
+      };
+    });
+
+    res.json({ success: true, leaderboard });
+  } catch (err) {
+    console.error("❌ Error obteniendo leaderboard:", err);
+    res.status(500).json({ success: false, error: 'Error al obtener ranking.' });
   }
 });
 
@@ -357,7 +415,6 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
     const pointsAwarded = parseInt(currency_amount || points || '0', 10);
 
     if (POSTBACK_SECRET && secret !== POSTBACK_SECRET) {
-      console.warn("⚠️ Postback AyeT rechazado: Secreto inválido.");
       return res.status(403).send('Unauthorized');
     }
 
@@ -378,7 +435,6 @@ app.get('/api/v1/ayet/postback', async (req, res) => {
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error("❌ Error en Postback AyeT:", err);
     return res.status(500).send('Internal Server Error');
   } finally {
     client.release();
@@ -403,7 +459,6 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
     const expectedSecret = process.env.CPX_HASH_SECRET || POSTBACK_SECRET;
 
     if (expectedSecret && secret !== expectedSecret) {
-      console.warn("⚠️ Postback CPX rechazado: Secreto inválido.");
       return res.status(403).send('Unauthorized');
     }
 
@@ -413,11 +468,7 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
     const pointsAwarded = parseInt(amount_local || points || '0', 10);
 
     await client.query('BEGIN');
-
-    const userCheck = await client.query(
-      'SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)',
-      [user_id]
-    );
+    const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [user_id]);
 
     if (userCheck.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -437,7 +488,6 @@ app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error("❌ Error en Postback CPX:", err);
     return res.status(500).send('Internal Server Error');
   } finally {
     client.release();
@@ -507,7 +557,6 @@ app.get('/api/v1/admin/withdrawals', authenticateAdmin, async (req, res) => {
 
     res.json({ success: true, withdrawals: result.rows });
   } catch (err) {
-    console.error("❌ Error en GET admin withdrawals:", err);
     res.status(500).json({ success: false, error: 'Error al obtener solicitudes.' });
   }
 });
@@ -524,7 +573,6 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
     }
 
     const newStatus = status.toLowerCase();
-
     await client.query('BEGIN');
 
     const currentRes = await client.query('SELECT * FROM withdrawals WHERE id = $1', [id]);
@@ -557,7 +605,6 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
 
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error("❌ Error actualizando retiro admin:", err);
     res.status(500).json({ success: false, error: 'Error al actualizar estado.' });
   } finally {
     client.release();
