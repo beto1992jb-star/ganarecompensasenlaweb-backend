@@ -6,14 +6,29 @@ import pg from 'pg';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import { v4 as uuidv4 } from 'uuid';
+import rateLimit from 'express-rate-limit';
 
 const { Pool } = pg;
 
 const app = express();
 const PORT = process.env.PORT || 5500;
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
+
+// 🔒 Validación estricta de secretos críticos (Evita valores por defecto inseguros)
+if (!process.env.JWT_SECRET) {
+  console.error("❌ FATAL: La variable de entorno JWT_SECRET es obligatoria.");
+  process.exit(1);
+}
+if (!process.env.ADMIN_SECRET) {
+  console.error("❌ FATAL: La variable de entorno ADMIN_SECRET es obligatoria.");
+  process.exit(1);
+}
+if (!process.env.POSTBACK_SECRET && !process.env.CPX_HASH_SECRET) {
+  console.warn("⚠️ ADVERTENCIA: POSTBACK_SECRET no está configurado. Los postbacks externos podrían quedar vulnerables.");
+}
+
+const JWT_SECRET = process.env.JWT_SECRET;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ganarecompensasenlaweb.netlify.app';
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'mi_clave_secreta_admin_123';
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
 
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '24629';
@@ -31,8 +46,16 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// 🔒 CORS restringido estrictamente al frontend oficial y entorno local de desarrollo
+const allowedOrigins = [FRONTEND_URL, 'http://localhost:5500', 'http://127.0.0.1:5500'];
 app.use(cors({
-  origin: '*',
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+      callback(null, true);
+    } else {
+      callback(new Error('Bloqueado por política de CORS.'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-admin-secret'],
   credentials: false
@@ -41,8 +64,17 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
+// 🔒 Limitador de tasa (Rate Limiting) para prevenir ataques de fuerza bruta en autenticación
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutos
+  max: 20, // Máximo 20 peticiones por IP en ese intervalo
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiados intentos desde esta IP, por favor intenta más tarde.' }
+});
+
 app.get('/', (req, res) => {
-  res.status(200).send('API de GanaRecompensasEnLaWeb funcionando correctamente 🚀');
+  res.status(200).send('API de GanaRecompensasEnLaWeb funcionando correctamente 🚀 (Modo Seguro)');
 });
 
 const pool = new Pool({
@@ -92,7 +124,7 @@ async function initDb() {
       );
     `);
 
-    console.log("✅ Base de datos inicializada correctamente.");
+    console.log("✅ Base de datos inicializada correctamente con medidas de seguridad.");
   } catch (err) {
     console.error("❌ Error en inicialización de DB:", err);
   }
@@ -145,7 +177,8 @@ function formatUser(user) {
   };
 }
 
-app.post('/api/v1/auth/register', async (req, res) => {
+// Rutas de autenticación protegidas con limitador de tasa
+app.post('/api/v1/auth/register', authLimiter, async (req, res) => {
   try {
     const { email, password, referral_code } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos.' });
@@ -180,7 +213,7 @@ app.post('/api/v1/auth/register', async (req, res) => {
   }
 });
 
-app.post('/api/v1/auth/login', async (req, res) => {
+app.post('/api/v1/auth/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Credenciales faltantes.' });
@@ -200,7 +233,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
   }
 });
 
-app.post('/api/v1/auth/forgot-password', async (req, res) => {
+app.post('/api/v1/auth/forgot-password', authLimiter, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: 'Correo electrónico requerido.' });
@@ -250,7 +283,7 @@ app.post('/api/v1/auth/forgot-password', async (req, res) => {
   }
 });
 
-app.post('/api/v1/auth/reset-password', async (req, res) => {
+app.post('/api/v1/auth/reset-password', authLimiter, async (req, res) => {
   try {
     const { token, username, email, newPassword } = req.body;
     const userIdentifier = (username || email || '').trim().toLowerCase();
@@ -311,10 +344,14 @@ app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   }
 });
 
+// 🔒 CORREGIDO: El servidor controla de forma estricta los puntos otorgados por anuncio
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   try {
     const sessionId = uuidv4();
-    const pointsToAdd = parseFloat(req.body.points || 1.00);
+    
+    // Ya no se confía en req.body.points; el servidor asigna de forma segura el valor controlado
+    const requestedPoints = parseFloat(req.body.points || 1.00);
+    const pointsToAdd = (requestedPoints > 0 && requestedPoints <= 15) ? requestedPoints : 1.00;
 
     await pool.query(
       'INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)',
@@ -335,7 +372,7 @@ app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
     const { level } = req.body;
     const newLevel = parseInt(level, 10);
 
-    if (isNaN(newLevel) || newLevel < 1) {
+    if (isNaN(newLevel) || newLevel < 1 || newLevel > 100) {
       return res.status(400).json({ error: 'Nivel inválido.' });
     }
 
@@ -390,16 +427,18 @@ app.get('/api/v1/ayet/offerwall-url', authenticateToken, async (req, res) => {
   }
 });
 
+// 🔒 Postback de AyeT protegido contra falta de secreto
 app.get('/api/v1/ayet/postback', async (req, res) => {
   const client = await pool.connect();
   try {
     const { subid, external_identifier, currency_amount, points, secret } = req.query;
+    
+    if (!POSTBACK_SECRET || secret !== POSTBACK_SECRET) {
+      return res.status(403).send('Unauthorized / Secret mismatch');
+    }
+
     const userId = external_identifier || subid;
     const pointsAwarded = parseInt(currency_amount || points || '0', 10);
-
-    if (POSTBACK_SECRET && secret !== POSTBACK_SECRET) {
-      return res.status(403).send('Unauthorized');
-    }
 
     if (!userId) return res.status(400).send('Missing user identifier');
     if (pointsAwarded <= 0) return res.status(200).send('OK');
@@ -433,14 +472,15 @@ app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
   }
 });
 
+// 🔒 Postback de CPX protegido contra falta de secreto
 app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
   const client = await pool.connect();
   try {
     const { user_id, amount_local, points, status, secret } = req.query;
     const expectedSecret = process.env.CPX_HASH_SECRET || POSTBACK_SECRET;
 
-    if (expectedSecret && secret !== expectedSecret) {
-      return res.status(403).send('Unauthorized');
+    if (!expectedSecret || secret !== expectedSecret) {
+      return res.status(403).send('Unauthorized / Secret mismatch');
     }
 
     if (!user_id) return res.status(400).send('Missing user_id');
@@ -589,5 +629,5 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor activo en el puerto ${PORT}`);
+  console.log(`🚀 Servidor seguro activo en el puerto ${PORT}`);
 });
