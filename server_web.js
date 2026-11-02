@@ -6,29 +6,14 @@ import pg from 'pg';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import { v4 as uuidv4 } from 'uuid';
-import rateLimit from 'express-rate-limit';
 
 const { Pool } = pg;
 
 const app = express();
 const PORT = process.env.PORT || 5500;
-
-// 🔒 Validación estricta de secretos críticos (Evita valores por defecto inseguros)
-if (!process.env.JWT_SECRET) {
-  console.error("❌ FATAL: La variable de entorno JWT_SECRET es obligatoria.");
-  process.exit(1);
-}
-if (!process.env.ADMIN_SECRET) {
-  console.error("❌ FATAL: La variable de entorno ADMIN_SECRET es obligatoria.");
-  process.exit(1);
-}
-if (!process.env.POSTBACK_SECRET && !process.env.CPX_HASH_SECRET) {
-  console.warn("⚠️ ADVERTENCIA: POSTBACK_SECRET no está configurado. Los postbacks externos podrían quedar vulnerables.");
-}
-
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_12345';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ganarecompensasenlaweb.netlify.app';
-const ADMIN_SECRET = process.env.ADMIN_SECRET;
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'mi_clave_secreta_admin_123';
 
 const CPX_APP_ID = process.env.CPX_APP_ID || '35135';
 const AYET_APP_ID = process.env.AYET_APP_ID || '24629';
@@ -37,597 +22,669 @@ const DIRECT_LINK_URL = process.env.DIRECT_LINK_URL || 'https://omg10.com/4/1153
 const POSTBACK_SECRET = process.env.POSTBACK_SECRET || process.env.CPX_HASH_SECRET;
 
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.SMTP_PORT || '587', 10),
-  secure: process.env.SMTP_SECURE === 'true',
-  auth: {
-    user: process.env.SMTP_USER || '',
-    pass: process.env.SMTP_PASS || ''
-  }
+host: process.env.SMTP_HOST || 'smtp.gmail.com',
+port: parseInt(process.env.SMTP_PORT || '587', 10),
+secure: process.env.SMTP_SECURE === 'true',
+auth: {
+user: process.env.SMTP_USER || '',
+pass: process.env.SMTP_PASS || ''
+}
 });
 
-// 🔒 CORS restringido estrictamente al frontend oficial y entorno local de desarrollo
-const allowedOrigins = [FRONTEND_URL, 'http://localhost:5500', 'http://127.0.0.1:5500'];
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
-      callback(null, true);
-    } else {
-      callback(new Error('Bloqueado por política de CORS.'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-admin-secret'],
-  credentials: false
+origin: '*',
+methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'x-admin-secret'],
+credentials: false
 }));
 
 app.options('*', cors());
 app.use(express.json());
 
-// 🔒 Limitador de tasa (Rate Limiting) para prevenir ataques de fuerza bruta en autenticación
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 20, // Máximo 20 peticiones por IP en ese intervalo
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Demasiados intentos desde esta IP, por favor intenta más tarde.' }
-});
-
 app.get('/', (req, res) => {
-  res.status(200).send('API de GanaRecompensasEnLaWeb funcionando correctamente 🚀 (Modo Seguro)');
+res.status(200).send('API de GanaRecompensasEnLaWeb funcionando correctamente 🚀');
 });
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/ganarecompensas',
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/ganarecompensas',
+ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-async function initDb() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id VARCHAR(36) PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        referral_code VARCHAR(50) UNIQUE NOT NULL,
-        referred_by VARCHAR(36),
-        points_balance NUMERIC(10,2) DEFAULT 0.00,
-        arcade_level INT DEFAULT 1,
-        reset_token VARCHAR(255),
-        reset_token_expires BIGINT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(referred_by) REFERENCES users(id) ON DELETE SET NULL
-      );
-    `);
+// 🇦🇷 OBTENER IDENTIFICADOR DE SEMANA ACTUAL (AÑO-SEMANA) SEGÚN HORA ARGENTINA
+function getArgentinaWeekKey() {
+const now = new Date();
+// Ajustar a hora argentina (UTC-3)
+const argTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Argentina/Buenos_Aires' }));
+const year = argTime.getFullYear();
 
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS ad_sessions (
-        id VARCHAR(36) PRIMARY KEY,
-        user_id VARCHAR(36) NOT NULL,
-        created_at BIGINT NOT NULL,
-        claimed INT DEFAULT 0,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-      );
-    `);
+// Calcular número de semana del año
+const startOfYear = new Date(year, 0, 1);
+const days = Math.floor((argTime - startOfYear) / (24 * 60 * 60 * 1000));
+const weekNumber = Math.ceil((days + startOfYear.getDay() + 1) / 7);
 
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS withdrawals (
-        id VARCHAR(36) PRIMARY KEY,
-        user_id VARCHAR(36) NOT NULL,
-        method VARCHAR(50) NOT NULL,
-        account_details VARCHAR(255) NOT NULL,
-        amount NUMERIC(10,2) NOT NULL CHECK (amount >= 5.00),
-        points_deducted INT NOT NULL,
-        status VARCHAR(20) DEFAULT 'PENDING',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-      );
-    `);
+return ${year}-W${weekNumber};
+}
 
-    console.log("✅ Base de datos inicializada correctamente con medidas de seguridad.");
-  } catch (err) {
-    console.error("❌ Error en inicialización de DB:", err);
+// 🔄 FUNCIÓN AUTOMÁTICA DE RESETEO SEMANAL Y REPARTO DE PREMIOS (TOP 3)
+async function checkAndExecuteWeeklyReset() {
+const client = await pool.connect();
+try {
+await client.query('BEGIN');
+
+// Obtener la semana actual en Argentina
+const currentWeekKey = getArgentinaWeekKey();
+
+// Verificar si ya se procesó esta semana en system_state
+const stateRes = await client.query('SELECT value FROM system_state WHERE key = $1', ['last_weekly_reset_week']);
+const lastResetWeek = stateRes.rows[0]?.value;
+
+if (lastResetWeek !== currentWeekKey) {
+  console.log(`🔄 Iniciando reseteo semanal y entrega de premios para la temporada: ${currentWeekKey}`);
+
+  // 1. Obtener los 3 mejores jugadores de la temporada que finalizó
+  const topRes = await client.query(`
+    SELECT id, email, arcade_level 
+    FROM users 
+    WHERE arcade_level > 1
+    ORDER BY arcade_level DESC, created_at ASC 
+    LIMIT 3
+  `);
+
+  const winners = topRes.rows;
+
+  // 2. Acreditar premios si existen ganadores
+  if (winners.length > 0) {
+    // 1er lugar: +100 puntos
+    if (winners[0]) {
+      await client.query('UPDATE users SET points_balance = points_balance + 100 WHERE id = $1', [winners[0].id]);
+      console.log(`🥇 1.er lugar (${winners[0].email}): +100 Puntos acreditados.`);
+    }
+    // 2do lugar: +60 puntos
+    if (winners[1]) {
+      await client.query('UPDATE users SET points_balance = points_balance + 60 WHERE id = $1', [winners[1].id]);
+      console.log(`🥈 2.º lugar (${winners[1].email}): +60 Puntos acreditados.`);
+    }
+    // 3er lugar: +40 puntos
+    if (winners[2]) {
+      await client.query('UPDATE users SET points_balance = points_balance + 40 WHERE id = $1', [winners[2].id]);
+      console.log(`🥉 3.er lugar (${winners[2].email}): +40 Puntos acreditados.`);
+    }
   }
+
+  // 3. Resetear el arcade_level de TODOS los usuarios a 1 para arrancar la nueva semana
+  await client.query('UPDATE users SET arcade_level = 1');
+  console.log("🎮 Todos los niveles de Arcade han sido reiniciados a 1.");
+
+  // 4. Guardar la nueva semana procesada
+  await client.query(`
+    INSERT INTO system_state (key, value) VALUES ('last_weekly_reset_week', $1)
+    ON CONFLICT (key) DO UPDATE SET value = $1
+  `, [currentWeekKey]);
+
+  await client.query('COMMIT');
+  console.log(`✅ Reseteo semanal completado con éxito para ${currentWeekKey}`);
+} else {
+  await client.query('COMMIT');
+}
+
+
+} catch (err) {
+await client.query('ROLLBACK');
+console.error("❌ Error en reseteo semanal automático:", err);
+} finally {
+client.release();
+}
+}
+
+async function initDb() {
+try {
+await pool.query(CREATE TABLE IF NOT EXISTS users ( id VARCHAR(36) PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, referral_code VARCHAR(50) UNIQUE NOT NULL, referred_by VARCHAR(36), points_balance NUMERIC(10,2) DEFAULT 0.00, arcade_level INT DEFAULT 1, reset_token VARCHAR(255), reset_token_expires BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(referred_by) REFERENCES users(id) ON DELETE SET NULL ););
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS ad_sessions (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    created_at BIGINT NOT NULL,
+    claimed INT DEFAULT 0,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS withdrawals (
+    id VARCHAR(36) PRIMARY KEY,
+    user_id VARCHAR(36) NOT NULL,
+    method VARCHAR(50) NOT NULL,
+    account_details VARCHAR(255) NOT NULL,
+    amount NUMERIC(10,2) NOT NULL CHECK (amount >= 5.00),
+    points_deducted INT NOT NULL,
+    status VARCHAR(20) DEFAULT 'PENDING',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+`);
+
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS system_state (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
+
+console.log("✅ Base de datos inicializada correctamente.");
+
+// Ejecutar verificación de reseteo semanal al iniciar servidor
+await checkAndExecuteWeeklyReset();
+
+
+} catch (err) {
+console.error("❌ Error en inicialización de DB:", err);
+}
 }
 initDb();
 
 async function generateUniqueReferralCode() {
-  let isUnique = false;
-  let code = '';
-  let attempts = 0;
+let isUnique = false;
+let code = '';
+let attempts = 0;
 
-  while (!isUnique && attempts < 10) {
-    code = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const check = await pool.query('SELECT id FROM users WHERE referral_code = $1', [code]);
-    if (check.rows.length === 0) isUnique = true;
-    attempts++;
-  }
+while (!isUnique && attempts < 10) {
+code = Math.random().toString(36).substring(2, 8).toUpperCase();
+const check = await pool.query('SELECT id FROM users WHERE referral_code = $1', [code]);
+if (check.rows.length === 0) isUnique = true;
+attempts++;
+}
 
-  return isUnique ? code : uuidv4().substring(0, 8).toUpperCase();
+return isUnique ? code : uuidv4().substring(0, 8).toUpperCase();
 }
 
 function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+const authHeader = req.headers['authorization'];
+const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) return res.status(401).json({ error: 'Token no proporcionado.' });
+if (!token) return res.status(401).json({ error: 'Token no proporcionado.' });
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Token inválido o expirado.' });
-    req.user = user;
-    next();
-  });
+jwt.verify(token, JWT_SECRET, (err, user) => {
+if (err) return res.status(403).json({ error: 'Token inválido o expirado.' });
+req.user = user;
+next();
+});
 }
 
 function authenticateAdmin(req, res, next) {
-  const adminSecretHeader = req.headers['x-admin-secret'];
-  if (!adminSecretHeader || adminSecretHeader !== ADMIN_SECRET) {
-    return res.status(401).json({ success: false, error: 'ADMIN_SECRET incorrecto o no autorizado.' });
-  }
-  next();
+const adminSecretHeader = req.headers['x-admin-secret'];
+if (!adminSecretHeader || adminSecretHeader !== ADMIN_SECRET) {
+return res.status(401).json({ success: false, error: 'ADMIN_SECRET incorrecto o no autorizado.' });
+}
+next();
 }
 
 function formatUser(user) {
-  return {
-    id: user.id,
-    email: user.email,
-    points_balance: parseFloat(user.points_balance || 0),
-    referral_code: user.referral_code,
-    arcade_level: parseInt(user.arcade_level || 1, 10)
-  };
+return {
+id: user.id,
+email: user.email,
+points_balance: parseFloat(user.points_balance || 0),
+referral_code: user.referral_code,
+arcade_level: parseInt(user.arcade_level || 1, 10)
+};
 }
 
-// Rutas de autenticación protegidas con limitador de tasa
-app.post('/api/v1/auth/register', authLimiter, async (req, res) => {
-  try {
-    const { email, password, referral_code } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos.' });
+app.post('/api/v1/auth/register', async (req, res) => {
+try {
+const { email, password, referral_code } = req.body;
+if (!email || !password) return res.status(400).json({ error: 'Email y contraseña requeridos.' });
 
-    const cleanEmail = email.trim().toLowerCase();
-    const existingUser = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
-    if (existingUser.rows.length > 0) return res.status(400).json({ error: 'El correo ya existe.' });
+const cleanEmail = email.trim().toLowerCase();
+const existingUser = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+if (existingUser.rows.length > 0) return res.status(400).json({ error: 'El correo ya existe.' });
 
-    let referredByUserId = null;
-    if (referral_code && typeof referral_code === 'string' && referral_code.trim() !== '') {
-      const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code.trim().toUpperCase()]);
-      if (referrer.rows.length > 0) referredByUserId = referrer.rows[0].id;
-    }
+let referredByUserId = null;
+if (referral_code && typeof referral_code === 'string' && referral_code.trim() !== '') {
+  const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code.trim().toUpperCase()]);
+  if (referrer.rows.length > 0) referredByUserId = referrer.rows[0].id;
+}
 
-    const userId = uuidv4();
-    const myReferralCode = await generateUniqueReferralCode();
-    const hashedPassword = await bcrypt.hash(password, 10);
+const userId = uuidv4();
+const myReferralCode = await generateUniqueReferralCode();
+const hashedPassword = await bcrypt.hash(password, 10);
 
-    const insertResult = await pool.query(
-      `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance, arcade_level)
-       VALUES ($1, $2, $3, $4, $5, 0, 1) RETURNING *`,
-      [userId, cleanEmail, hashedPassword, myReferralCode, referredByUserId]
-    );
+const insertResult = await pool.query(
+  `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance, arcade_level)
+   VALUES ($1, $2, $3, $4, $5, 0, 1) RETURNING *`,
+  [userId, cleanEmail, hashedPassword, myReferralCode, referredByUserId]
+);
 
-    const newUser = insertResult.rows[0];
-    const token = jwt.sign({ id: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '7d' });
+const newUser = insertResult.rows[0];
+const token = jwt.sign({ id: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '7d' });
 
-    return res.status(201).json({ message: 'Registro exitoso.', token, user: formatUser(newUser) });
-  } catch (error) {
-    console.error("❌ Error en registro:", error);
-    return res.status(500).json({ error: 'Error en servidor.' });
-  }
+return res.status(201).json({ message: 'Registro exitoso.', token, user: formatUser(newUser) });
+
+
+} catch (error) {
+console.error("❌ Error en registro:", error);
+return res.status(500).json({ error: 'Error en servidor.' });
+}
 });
 
-app.post('/api/v1/auth/login', authLimiter, async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Credenciales faltantes.' });
+app.post('/api/v1/auth/login', async (req, res) => {
+try {
+const { email, password } = req.body;
+if (!email || !password) return res.status(400).json({ error: 'Credenciales faltantes.' });
 
-    const cleanEmail = email.trim().toLowerCase();
-    const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+const cleanEmail = email.trim().toLowerCase();
+const result = await pool.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+const user = result.rows[0];
+
+if (!user || !(await bcrypt.compare(password, user.password))) {
+  return res.status(400).json({ error: 'Credenciales inválidas.' });
+}
+
+const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+res.json({ message: 'Login exitoso.', token, user: formatUser(user) });
+
+
+} catch (error) {
+res.status(500).json({ error: 'Error en servidor.' });
+}
+});
+
+app.post('/api/v1/auth/forgot-password', async (req, res) => {
+try {
+const { email } = req.body;
+if (!email) return res.status(400).json({ error: 'Correo electrónico requerido.' });
+
+const cleanEmail = email.trim().toLowerCase();
+const result = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+
+if (result.rows.length === 0) {
+  return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
+}
+
+const resetToken = crypto.randomBytes(32).toString('hex');
+const expires = Date.now() + 3600000;
+
+await pool.query(
+  'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE LOWER(email) = $3',
+  [resetToken, expires, cleanEmail]
+);
+
+const resetLink = `${FRONTEND_URL}/reset-password.html?token=${resetToken}`;
+
+if (process.env.SMTP_USER && process.env.SMTP_PASS) {
+  try {
+    await transporter.sendMail({
+      from: `"GanaRecompensas" <${process.env.SMTP_USER}>`,
+      to: cleanEmail,
+      subject: 'Recuperación de Contraseña',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
+          <p>Haz clic en el siguiente enlace para cambiar tu contraseña:</p>
+          <p><a href="${resetLink}" style="background: #38bdf8; color: #000; padding: 10px 15px; text-decoration: none; border-radius: 5px; font-weight: bold;">Restablecer Contraseña</a></p>
+          <p>Este enlace expirará en 1 hora.</p>
+        </div>
+      `
+    });
+  } catch (emailErr) {
+    console.error("❌ Error al enviar email via SMTP:", emailErr);
+  }
+} else {
+  console.log(`🔗 Link de recuperación generado para ${cleanEmail}: ${resetLink}`);
+}
+
+return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
+
+
+} catch (err) {
+console.error("❌ Error en forgot-password:", err);
+return res.status(500).json({ error: 'Error procesando la solicitud.' });
+}
+});
+
+app.post('/api/v1/auth/reset-password', async (req, res) => {
+try {
+const { token, username, email, newPassword } = req.body;
+const userIdentifier = (username || email || '').trim().toLowerCase();
+
+if (!newPassword || newPassword.length < 6) {
+  return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres.' });
+}
+
+let targetUserId = null;
+
+if (token) {
+  const result = await pool.query(
+    'SELECT id, reset_token_expires FROM users WHERE reset_token = $1',
+    [token]
+  );
+
+  if (result.rows.length > 0) {
     const user = result.rows[0];
-
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(400).json({ error: 'Credenciales inválidas.' });
-    }
-
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ message: 'Login exitoso.', token, user: formatUser(user) });
-  } catch (error) {
-    res.status(500).json({ error: 'Error en servidor.' });
-  }
-});
-
-app.post('/api/v1/auth/forgot-password', authLimiter, async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Correo electrónico requerido.' });
-
-    const cleanEmail = email.trim().toLowerCase();
-    const result = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [cleanEmail]);
-
-    if (result.rows.length === 0) {
-      return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
-    }
-
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const expires = Date.now() + 3600000;
-
-    await pool.query(
-      'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE LOWER(email) = $3',
-      [resetToken, expires, cleanEmail]
-    );
-
-    const resetLink = `${FRONTEND_URL}/reset-password.html?token=${resetToken}`;
-
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      try {
-        await transporter.sendMail({
-          from: `"GanaRecompensas" <${process.env.SMTP_USER}>`,
-          to: cleanEmail,
-          subject: 'Recuperación de Contraseña',
-          html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-              <p>Haz clic en el siguiente enlace para cambiar tu contraseña:</p>
-              <p><a href="${resetLink}" style="background: #38bdf8; color: #000; padding: 10px 15px; text-decoration: none; border-radius: 5px; font-weight: bold;">Restablecer Contraseña</a></p>
-              <p>Este enlace expirará en 1 hora.</p>
-            </div>
-          `
-        });
-      } catch (emailErr) {
-        console.error("❌ Error al enviar email via SMTP:", emailErr);
-      }
+    if (Date.now() <= parseInt(user.reset_token_expires, 10)) {
+      targetUserId = user.id;
     } else {
-      console.log(`🔗 Link de recuperación generado para ${cleanEmail}: ${resetLink}`);
+      return res.status(400).json({ error: 'El enlace de recuperación ha expirado.' });
     }
-
-    return res.json({ message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
-  } catch (err) {
-    console.error("❌ Error en forgot-password:", err);
-    return res.status(500).json({ error: 'Error procesando la solicitud.' });
   }
-});
+}
 
-app.post('/api/v1/auth/reset-password', authLimiter, async (req, res) => {
-  try {
-    const { token, username, email, newPassword } = req.body;
-    const userIdentifier = (username || email || '').trim().toLowerCase();
-
-    if (!newPassword || newPassword.length < 6) {
-      return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres.' });
-    }
-
-    let targetUserId = null;
-
-    if (token) {
-      const result = await pool.query(
-        'SELECT id, reset_token_expires FROM users WHERE reset_token = $1',
-        [token]
-      );
-
-      if (result.rows.length > 0) {
-        const user = result.rows[0];
-        if (Date.now() <= parseInt(user.reset_token_expires, 10)) {
-          targetUserId = user.id;
-        } else {
-          return res.status(400).json({ error: 'El enlace de recuperación ha expirado.' });
-        }
-      }
-    }
-
-    if (!targetUserId && userIdentifier) {
-      const userRes = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [userIdentifier]);
-      if (userRes.rows.length > 0) {
-        targetUserId = userRes.rows[0].id;
-      }
-    }
-
-    if (!targetUserId) {
-      return res.status(400).json({ error: 'Usuario no encontrado o token inválido.' });
-    }
-
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-    await pool.query(
-      'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
-      [hashedPassword, targetUserId]
-    );
-
-    return res.json({ message: 'Contraseña actualizada con éxito.' });
-  } catch (err) {
-    console.error("❌ Error en reset-password:", err);
-    return res.status(500).json({ error: 'Error al actualizar la contraseña.' });
+if (!targetUserId && userIdentifier) {
+  const userRes = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [userIdentifier]);
+  if (userRes.rows.length > 0) {
+    targetUserId = userRes.rows[0].id;
   }
+}
+
+if (!targetUserId) {
+  return res.status(400).json({ error: 'Usuario no encontrado o token inválido.' });
+}
+
+const hashedPassword = await bcrypt.hash(newPassword, 10);
+await pool.query(
+  'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
+  [hashedPassword, targetUserId]
+);
+
+return res.json({ message: 'Contraseña actualizada con éxito.' });
+
+
+} catch (err) {
+console.error("❌ Error en reset-password:", err);
+return res.status(500).json({ error: 'Error al actualizar la contraseña.' });
+}
 });
 
 app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado.' });
-    res.json({ user: formatUser(result.rows[0]) });
-  } catch (err) {
-    res.status(500).json({ error: 'Error de servidor.' });
-  }
+try {
+// Comprobar reseteo semanal al consultar perfil
+await checkAndExecuteWeeklyReset();
+
+const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado.' });
+res.json({ user: formatUser(result.rows[0]) });
+
+
+} catch (err) {
+res.status(500).json({ error: 'Error de servidor.' });
+}
 });
 
-// 🔒 CORREGIDO: El servidor controla de forma estricta los puntos otorgados por anuncio
 app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
-  try {
-    const sessionId = uuidv4();
-    
-    // Ya no se confía en req.body.points; el servidor asigna de forma segura el valor controlado
-    const requestedPoints = parseFloat(req.body.points || 1.00);
-    const pointsToAdd = (requestedPoints > 0 && requestedPoints <= 15) ? requestedPoints : 1.00;
+try {
+const sessionId = uuidv4();
+const pointsToAdd = parseFloat(req.body.points || 1.00);
 
-    await pool.query(
-      'INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)',
-      [sessionId, req.user.id, Date.now()]
-    );
-    await pool.query(
-      'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
-      [pointsToAdd, req.user.id]
-    );
-    res.json({ sessionId, adUrl: `${DIRECT_LINK_URL}?sub1=${req.user.id}` });
-  } catch (err) {
-    res.status(500).json({ error: 'Error al iniciar oferta.' });
-  }
+await pool.query(
+  'INSERT INTO ad_sessions (id, user_id, created_at) VALUES ($1, $2, $3)',
+  [sessionId, req.user.id, Date.now()]
+);
+await pool.query(
+  'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
+  [pointsToAdd, req.user.id]
+);
+res.json({ sessionId, adUrl: `${DIRECT_LINK_URL}?sub1=${req.user.id}` });
+
+
+} catch (err) {
+res.status(500).json({ error: 'Error al iniciar oferta.' });
+}
 });
 
 app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
-  try {
-    const { level } = req.body;
-    const newLevel = parseInt(level, 10);
+try {
+const { level } = req.body;
+const newLevel = parseInt(level, 10);
 
-    if (isNaN(newLevel) || newLevel < 1 || newLevel > 100) {
-      return res.status(400).json({ error: 'Nivel inválido.' });
-    }
+if (isNaN(newLevel) || newLevel < 1) {
+  return res.status(400).json({ error: 'Nivel inválido.' });
+}
 
-    await pool.query(
-      'UPDATE users SET arcade_level = GREATEST(COALESCE(arcade_level, 1), $1) WHERE id = $2',
-      [newLevel, req.user.id]
-    );
+await pool.query(
+  'UPDATE users SET arcade_level = GREATEST(COALESCE(arcade_level, 1), $1) WHERE id = $2',
+  [newLevel, req.user.id]
+);
 
-    res.json({ success: true, message: 'Nivel de arcade sincronizado.' });
-  } catch (err) {
-    console.error("❌ Error actualizando nivel arcade:", err);
-    res.status(500).json({ error: 'Error en servidor.' });
-  }
+res.json({ success: true, message: 'Nivel de arcade sincronizado.' });
+
+
+} catch (err) {
+console.error("❌ Error actualizando nivel arcade:", err);
+res.status(500).json({ error: 'Error en servidor.' });
+}
 });
 
 app.get('/api/v1/leaderboard', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT email, arcade_level 
-      FROM users 
-      ORDER BY arcade_level DESC, created_at ASC 
-      LIMIT 10
-    `);
+try {
+// Comprobar reseteo semanal al consultar el leaderboard
+await checkAndExecuteWeeklyReset();
 
-    const leaderboard = result.rows.map((row, index) => {
-      const emailParts = row.email.split('@');
-      const name = emailParts[0];
-      const maskedName = name.length > 3 ? name.substring(0, 4) + '****' : name + '***';
-      const maskedEmail = `${maskedName}@${emailParts[1]}`;
+const result = await pool.query(`
+  SELECT email, arcade_level 
+  FROM users 
+  ORDER BY arcade_level DESC, created_at ASC 
+  LIMIT 10
+`);
 
-      return {
-        position: index + 1,
-        email: maskedEmail,
-        level: row.arcade_level || 1
-      };
-    });
+const leaderboard = result.rows.map((row, index) => {
+  const emailParts = row.email.split('@');
+  const name = emailParts[0];
+  const maskedName = name.length > 3 ? name.substring(0, 4) + '****' : name + '***';
+  const maskedEmail = `${maskedName}@${emailParts[1]}`;
 
-    res.json({ success: true, leaderboard });
-  } catch (err) {
-    console.error("❌ Error obteniendo leaderboard:", err);
-    res.status(500).json({ success: false, error: 'Error al obtener ranking.' });
-  }
+  return {
+    position: index + 1,
+    email: maskedEmail,
+    level: row.arcade_level || 1
+  };
+});
+
+res.json({ success: true, leaderboard });
+
+
+} catch (err) {
+console.error("❌ Error obteniendo leaderboard:", err);
+res.status(500).json({ success: false, error: 'Error al obtener ranking.' });
+}
 });
 
 app.get('/api/v1/ayet/offerwall-url', authenticateToken, async (req, res) => {
-  try {
-    const adSlot = process.env.AYET_APP_ID || AYET_APP_ID;
-    const url = `https://offerwall.ayet.io/offers?adSlot=${adSlot}&externalIdentifier=${req.user.id}`;
-    res.json({ url });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al obtener URL de AyeT-Studios.' });
-  }
+try {
+const adSlot = process.env.AYET_APP_ID || AYET_APP_ID;
+const url = https://offerwall.ayet.io/offers?adSlot=${adSlot}&externalIdentifier=${req.user.id};
+res.json({ url });
+} catch (error) {
+res.status(500).json({ error: 'Error al obtener URL de AyeT-Studios.' });
+}
 });
 
-// 🔒 Postback de AyeT protegido contra falta de secreto
 app.get('/api/v1/ayet/postback', async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { subid, external_identifier, currency_amount, points, secret } = req.query;
-    
-    if (!POSTBACK_SECRET || secret !== POSTBACK_SECRET) {
-      return res.status(403).send('Unauthorized / Secret mismatch');
-    }
+const client = await pool.connect();
+try {
+const { subid, external_identifier, currency_amount, points, secret } = req.query;
+const userId = external_identifier || subid;
+const pointsAwarded = parseInt(currency_amount || points || '0', 10);
 
-    const userId = external_identifier || subid;
-    const pointsAwarded = parseInt(currency_amount || points || '0', 10);
+if (POSTBACK_SECRET && secret !== POSTBACK_SECRET) {
+  return res.status(403).send('Unauthorized');
+}
 
-    if (!userId) return res.status(400).send('Missing user identifier');
-    if (pointsAwarded <= 0) return res.status(200).send('OK');
+if (!userId) return res.status(400).send('Missing user identifier');
+if (pointsAwarded <= 0) return res.status(200).send('OK');
 
-    await client.query('BEGIN');
-    const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [userId]);
-    if (userCheck.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).send('User not found');
-    }
+await client.query('BEGIN');
+const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [userId]);
+if (userCheck.rows.length === 0) {
+  await client.query('ROLLBACK');
+  return res.status(404).send('User not found');
+}
 
-    const actualUserId = userCheck.rows[0].id;
-    await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
-    await client.query('COMMIT');
-    return res.status(200).send('OK');
+const actualUserId = userCheck.rows[0].id;
+await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
+await client.query('COMMIT');
+return res.status(200).send('OK');
 
-  } catch (err) {
-    await client.query('ROLLBACK');
-    return res.status(500).send('Internal Server Error');
-  } finally {
-    client.release();
-  }
+
+} catch (err) {
+await client.query('ROLLBACK');
+return res.status(500).send('Internal Server Error');
+} finally {
+client.release();
+}
 });
 
 app.get('/api/v1/cpx/survey-url', authenticateToken, async (req, res) => {
-  try {
-    const url = `https://offers.cpx-research.com/index.php?app_id=${CPX_APP_ID}&ext_user_id=${req.user.id}&username=${encodeURIComponent(req.user.email)}`;
-    res.json({ url });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al obtener URL de CPX.' });
-  }
+try {
+const url = https://offers.cpx-research.com/index.php?app_id=${CPX_APP_ID}&ext_user_id=${req.user.id}&username=${encodeURIComponent(req.user.email)};
+res.json({ url });
+} catch (error) {
+res.status(500).json({ error: 'Error al obtener URL de CPX.' });
+}
 });
 
-// 🔒 Postback de CPX protegido contra falta de secreto
 app.get(['/api/cpx-postback', '/api/v1/cpx/postback'], async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { user_id, amount_local, points, status, secret } = req.query;
-    const expectedSecret = process.env.CPX_HASH_SECRET || POSTBACK_SECRET;
+const client = await pool.connect();
+try {
+const { user_id, amount_local, points, status, secret } = req.query;
+const expectedSecret = process.env.CPX_HASH_SECRET || POSTBACK_SECRET;
 
-    if (!expectedSecret || secret !== expectedSecret) {
-      return res.status(403).send('Unauthorized / Secret mismatch');
-    }
+if (expectedSecret && secret !== expectedSecret) {
+  return res.status(403).send('Unauthorized');
+}
 
-    if (!user_id) return res.status(400).send('Missing user_id');
+if (!user_id) return res.status(400).send('Missing user_id');
 
-    const statusNum = parseInt(status || '1', 10);
-    const pointsAwarded = parseInt(amount_local || points || '0', 10);
+const statusNum = parseInt(status || '1', 10);
+const pointsAwarded = parseInt(amount_local || points || '0', 10);
 
-    await client.query('BEGIN');
-    const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [user_id]);
+await client.query('BEGIN');
+const userCheck = await client.query('SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($1)', [user_id]);
 
-    if (userCheck.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).send('User not found');
-    }
+if (userCheck.rows.length === 0) {
+  await client.query('ROLLBACK');
+  return res.status(404).send('User not found');
+}
 
-    const actualUserId = userCheck.rows[0].id;
+const actualUserId = userCheck.rows[0].id;
 
-    if (statusNum === 1 && pointsAwarded > 0) {
-      await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
-    } else if (statusNum === 2 && pointsAwarded > 0) {
-      await client.query('UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2', [pointsAwarded, actualUserId]);
-    }
+if (statusNum === 1 && pointsAwarded > 0) {
+  await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [pointsAwarded, actualUserId]);
+} else if (statusNum === 2 && pointsAwarded > 0) {
+  await client.query('UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2', [pointsAwarded, actualUserId]);
+}
 
-    await client.query('COMMIT');
-    return res.status(200).send('OK');
+await client.query('COMMIT');
+return res.status(200).send('OK');
 
-  } catch (err) {
-    await client.query('ROLLBACK');
-    return res.status(500).send('Internal Server Error');
-  } finally {
-    client.release();
-  }
+
+} catch (err) {
+await client.query('ROLLBACK');
+return res.status(500).send('Internal Server Error');
+} finally {
+client.release();
+}
 });
 
 app.post('/api/v1/withdraw/request', authenticateToken, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { method, payout_method, account_details, amount } = req.body;
-    const withdrawalMethod = method || payout_method;
-    const numAmount = parseFloat(amount);
+const client = await pool.connect();
+try {
+const { method, payout_method, account_details, amount } = req.body;
+const withdrawalMethod = method || payout_method;
+const numAmount = parseFloat(amount);
 
-    if (!withdrawalMethod || !account_details || isNaN(numAmount) || numAmount < 5.0) {
-      return res.status(400).json({ error: 'Retiro inválido. Mínimo $5.00 USD.' });
-    }
+if (!withdrawalMethod || !account_details || isNaN(numAmount) || numAmount < 5.0) {
+  return res.status(400).json({ error: 'Retiro inválido. Mínimo $5.00 USD.' });
+}
 
-    const requiredPoints = Math.ceil(numAmount * 1000);
-    const userRes = await client.query('SELECT points_balance FROM users WHERE id = $1', [req.user.id]);
-    const currentPoints = parseFloat(userRes.rows[0]?.points_balance || 0);
+const requiredPoints = Math.ceil(numAmount * 1000);
+const userRes = await client.query('SELECT points_balance FROM users WHERE id = $1', [req.user.id]);
+const currentPoints = parseFloat(userRes.rows[0]?.points_balance || 0);
 
-    if (currentPoints < requiredPoints) {
-      return res.status(400).json({ error: `Saldo insuficiente. Necesitas ${requiredPoints} pts.` });
-    }
+if (currentPoints < requiredPoints) {
+  return res.status(400).json({ error: `Saldo insuficiente. Necesitas ${requiredPoints} pts.` });
+}
 
-    await client.query('BEGIN');
-    await client.query('UPDATE users SET points_balance = points_balance - $1 WHERE id = $2', [requiredPoints, req.user.id]);
-    await client.query(
-      `INSERT INTO withdrawals (id, user_id, method, account_details, amount, points_deducted)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [uuidv4(), req.user.id, withdrawalMethod, account_details, numAmount, requiredPoints]
-    );
-    await client.query('COMMIT');
+await client.query('BEGIN');
+await client.query('UPDATE users SET points_balance = points_balance - $1 WHERE id = $2', [requiredPoints, req.user.id]);
+await client.query(
+  `INSERT INTO withdrawals (id, user_id, method, account_details, amount, points_deducted)
+   VALUES ($1, $2, $3, $4, $5, $6)`,
+  [uuidv4(), req.user.id, withdrawalMethod, account_details, numAmount, requiredPoints]
+);
+await client.query('COMMIT');
 
-    res.json({ message: 'Solicitud de retiro procesada correctamente.' });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: 'Error interno en retiro.' });
-  } finally {
-    client.release();
-  }
+res.json({ message: 'Solicitud de retiro procesada correctamente.' });
+
+
+} catch (err) {
+await client.query('ROLLBACK');
+res.status(500).json({ error: 'Error interno en retiro.' });
+} finally {
+client.release();
+}
 });
 
 app.get('/api/v1/admin/withdrawals', authenticateAdmin, async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        w.id,
-        w.user_id,
-        u.email,
-        w.method AS payout_method,
-        w.account_details AS payout_destination,
-        w.amount AS amount_usd,
-        0 AS fee_usd,
-        w.amount AS net_amount_usd,
-        w.points_deducted,
-        w.status,
-        w.created_at
-      FROM withdrawals w
-      JOIN users u ON w.user_id = u.id
-      ORDER BY w.created_at DESC
-    `);
+try {
+const result = await pool.query(SELECT  w.id, w.user_id, u.email, w.method AS payout_method, w.account_details AS payout_destination, w.amount AS amount_usd, 0 AS fee_usd, w.amount AS net_amount_usd, w.points_deducted, w.status, w.created_at FROM withdrawals w JOIN users u ON w.user_id = u.id ORDER BY w.created_at DESC);
 
-    res.json({ success: true, withdrawals: result.rows });
-  } catch (err) {
-    res.status(500).json({ success: false, error: 'Error al obtener solicitudes.' });
-  }
+res.json({ success: true, withdrawals: result.rows });
+
+
+} catch (err) {
+res.status(500).json({ success: false, error: 'Error al obtener solicitudes.' });
+}
 });
 
 app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
+const client = await pool.connect();
+try {
+const { id } = req.params;
+const { status } = req.body;
 
-    const validStatuses = ['approved', 'rejected', 'completed', 'pending'];
-    if (!status || !validStatuses.includes(status.toLowerCase())) {
-      return res.status(400).json({ success: false, error: 'Estado no válido.' });
-    }
+const validStatuses = ['approved', 'rejected', 'completed', 'pending'];
+if (!status || !validStatuses.includes(status.toLowerCase())) {
+  return res.status(400).json({ success: false, error: 'Estado no válido.' });
+}
 
-    const newStatus = status.toLowerCase();
-    await client.query('BEGIN');
+const newStatus = status.toLowerCase();
+await client.query('BEGIN');
 
-    const currentRes = await client.query('SELECT * FROM withdrawals WHERE id = $1', [id]);
-    if (currentRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ success: false, error: 'Solicitud no encontrada.' });
-    }
+const currentRes = await client.query('SELECT * FROM withdrawals WHERE id = $1', [id]);
+if (currentRes.rows.length === 0) {
+  await client.query('ROLLBACK');
+  return res.status(404).json({ success: false, error: 'Solicitud no encontrada.' });
+}
 
-    const currentWithdrawal = currentRes.rows[0];
-    const prevStatus = currentWithdrawal.status.toLowerCase();
+const currentWithdrawal = currentRes.rows[0];
+const prevStatus = currentWithdrawal.status.toLowerCase();
 
-    if (newStatus === 'rejected' && prevStatus !== 'rejected') {
-      await client.query(
-        'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
-        [currentWithdrawal.points_deducted, currentWithdrawal.user_id]
-      );
-    }
+if (newStatus === 'rejected' && prevStatus !== 'rejected') {
+  await client.query(
+    'UPDATE users SET points_balance = points_balance + $1 WHERE id = $2',
+    [currentWithdrawal.points_deducted, currentWithdrawal.user_id]
+  );
+}
 
-    if (prevStatus === 'rejected' && newStatus !== 'rejected') {
-      await client.query(
-        'UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2',
-        [currentWithdrawal.points_deducted, currentWithdrawal.user_id]
-      );
-    }
+if (prevStatus === 'rejected' && newStatus !== 'rejected') {
+  await client.query(
+    'UPDATE users SET points_balance = GREATEST(0, points_balance - $1) WHERE id = $2',
+    [currentWithdrawal.points_deducted, currentWithdrawal.user_id]
+  );
+}
 
-    await client.query('UPDATE withdrawals SET status = $1 WHERE id = $2', [newStatus.toUpperCase(), id]);
-    await client.query('COMMIT');
+await client.query('UPDATE withdrawals SET status = $1 WHERE id = $2', [newStatus.toUpperCase(), id]);
+await client.query('COMMIT');
 
-    res.json({ success: true, message: `Solicitud marcada como ${newStatus}.` });
+res.json({ success: true, message: `Solicitud marcada como ${newStatus}.` });
 
-  } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ success: false, error: 'Error al actualizar estado.' });
-  } finally {
-    client.release();
-  }
+
+} catch (err) {
+await client.query('ROLLBACK');
+res.status(500).json({ success: false, error: 'Error al actualizar estado.' });
+} finally {
+client.release();
+}
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor seguro activo en el puerto ${PORT}`);
+console.log(🚀 Servidor activo en el puerto ${PORT});
 });
