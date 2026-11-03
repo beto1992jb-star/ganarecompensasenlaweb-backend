@@ -108,6 +108,8 @@ async function initDb() {
         referred_by VARCHAR(36),
         points_balance NUMERIC(10,2) DEFAULT 0.00,
         arcade_level INT DEFAULT 1,
+		reaction_level INT DEFAULT 1,
+        attention_level INT DEFAULT 1,
         reset_token VARCHAR(255),
         reset_token_expires BIGINT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -370,6 +372,50 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
   }
 });
 
+// Endpoint para sincronizar el nivel de Reacción Rápida
+app.post('/api/v1/user/reaction-level', authenticateToken, async (req, res) => {
+  try {
+    const { level } = req.body;
+    const newLevel = parseInt(level, 10);
+
+    if (isNaN(newLevel) || newLevel < 1) {
+      return res.status(400).json({ error: 'Nivel inválido.' });
+    }
+
+    await pool.query(
+      'UPDATE users SET reaction_level = GREATEST(COALESCE(reaction_level, 1), $1) WHERE id = $2',
+      [newLevel, req.user.id]
+    );
+
+    res.json({ success: true, message: 'Nivel de reacción sincronizado.' });
+  } catch (err) {
+    console.error("❌ Error actualizando nivel de reacción:", err);
+    res.status(500).json({ error: 'Error en servidor.' });
+  }
+});
+
+// Endpoint para sincronizar el nivel de Atención y Memoria
+app.post('/api/v1/user/attention-level', authenticateToken, async (req, res) => {
+  try {
+    const { level } = req.body;
+    const newLevel = parseInt(level, 10);
+
+    if (isNaN(newLevel) || newLevel < 1) {
+      return res.status(400).json({ error: 'Nivel inválido.' });
+    }
+
+    await pool.query(
+      'UPDATE users SET attention_level = GREATEST(COALESCE(attention_level, 1), $1) WHERE id = $2',
+      [newLevel, req.user.id]
+    );
+
+    res.json({ success: true, message: 'Nivel de atención sincronizado.' });
+  } catch (err) {
+    console.error("❌ Error actualizando nivel de atención:", err);
+    res.status(500).json({ error: 'Error en servidor.' });
+  }
+});
+
 app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   try {
     await checkAndExecuteWeeklyReset(); 
@@ -421,35 +467,60 @@ app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
   }
 });
 
-app.get('/api/v1/leaderboard', async (req, res) => {
+app.get('/api/v1/leaderboards', async (req, res) => {
   try {
     await checkAndExecuteWeeklyReset(); 
 
-    const result = await pool.query(`
-      SELECT email, arcade_level 
+    // 1. Leaderboard Arcade
+    const arcadeRes = await pool.query(`
+      SELECT email, arcade_level AS level 
       FROM users 
       WHERE arcade_level > 1
       ORDER BY arcade_level DESC, created_at ASC 
       LIMIT 10
     `);
 
-    const leaderboard = result.rows.map((row, index) => {
-      const emailParts = row.email.split('@');
+    // 2. Leaderboard Reacción Rápida
+    const reactionRes = await pool.query(`
+      SELECT email, reaction_level AS level 
+      FROM users 
+      WHERE reaction_level > 1
+      ORDER BY reaction_level DESC, created_at ASC 
+      LIMIT 10
+    `);
+
+    // 3. Leaderboard Atención y Memoria
+    const attentionRes = await pool.query(`
+      SELECT email, attention_level AS level 
+      FROM users 
+      WHERE attention_level > 1
+      ORDER BY attention_level DESC, created_at ASC 
+      LIMIT 10
+    `);
+
+    const maskEmail = (email) => {
+      const emailParts = email.split('@');
       const name = emailParts[0];
       const maskedName = name.length > 3 ? name.substring(0, 4) + '****' : name + '***';
-      const maskedEmail = `${maskedName}@${emailParts[1]}`;
+      return `${maskedName}@${emailParts[1]}`;
+    };
 
-      return {
-        position: index + 1,
-        email: maskedEmail,
-        level: row.arcade_level || 1
-      };
+    const formatList = (rows) => rows.map((row, index) => ({
+      position: index + 1,
+      email: maskEmail(row.email),
+      level: row.level || 1
+    }));
+
+    res.json({
+      success: true,
+      arcade: formatList(arcadeRes.rows),
+      reaction: formatList(reactionRes.rows),
+      attention: formatList(attentionRes.rows)
     });
 
-    res.json({ success: true, leaderboard });
   } catch (err) {
-    console.error("❌ Error obteniendo leaderboard:", err);
-    res.status(500).json({ success: false, error: 'Error al obtener ranking.' });
+    console.error("❌ Error obteniendo leaderboards:", err);
+    res.status(500).json({ success: false, error: 'Error al obtener rankings.' });
   }
 });
 
