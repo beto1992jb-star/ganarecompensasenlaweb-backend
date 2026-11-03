@@ -374,24 +374,24 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
 
 // Endpoint para sincronizar el nivel de Reacción Rápida
 app.post('/api/v1/user/reaction-level', authenticateToken, async (req, res) => {
-  try {
-    const { level } = req.body;
-    const newLevel = parseInt(level, 10);
+    try {
+        const { level } = req.body;
+        const newLevel = parseInt(level, 10);
 
-    if (isNaN(newLevel) || newLevel < 1) {
-      return res.status(400).json({ error: 'Nivel inválido.' });
+        if (isNaN(newLevel) || newLevel < 150) {
+            return res.status(400).json({ error: 'Tiempo inválido.' });
+        }
+
+        // Usamos LEAST para conservar únicamente el tiempo más rápido (menor ms) que haya logrado el usuario
+        await pool.query(
+            'UPDATE users SET reaction_level = LEAST(COALESCE(reaction_level, 9999), $1) WHERE id = $2',
+            [newLevel, req.user.id]
+        );
+
+        res.json({ success: true, message: 'Nivel de reacción sincronizado.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Error en servidor.' });
     }
-
-    await pool.query(
-      'UPDATE users SET reaction_level = GREATEST(COALESCE(reaction_level, 1), $1) WHERE id = $2',
-      [newLevel, req.user.id]
-    );
-
-    res.json({ success: true, message: 'Nivel de reacción sincronizado.' });
-  } catch (err) {
-    console.error("❌ Error actualizando nivel de reacción:", err);
-    res.status(500).json({ error: 'Error en servidor.' });
-  }
 });
 
 // Endpoint para sincronizar el nivel de Atención y Memoria
@@ -484,11 +484,11 @@ app.get('/api/v1/leaderboards', async (req, res) => {
     const reactionRes = await pool.query(`
       SELECT email, reaction_level AS level 
       FROM users 
-      WHERE reaction_level < 9999 AND reaction_level > 0
+      WHERE reaction_level >= 150 AND reaction_level < 9999
       ORDER BY reaction_level ASC, created_at ASC 
       LIMIT 10
     `);
-
+	
     // 3. Leaderboard Atención y Memoria
     const attentionRes = await pool.query(`
       SELECT email, attention_level AS level 
