@@ -480,12 +480,12 @@ app.get('/api/v1/leaderboards', async (req, res) => {
       LIMIT 10
     `);
 
-    // 2. Leaderboard Reacción Rápida
+    // 2. Leaderboard Reacción Rápida (Ordenado por menor tiempo en ms)
     const reactionRes = await pool.query(`
       SELECT email, reaction_level AS level 
       FROM users 
-      WHERE reaction_level > 1
-      ORDER BY reaction_level DESC, created_at ASC 
+      WHERE reaction_level < 9999 AND reaction_level > 0
+      ORDER BY reaction_level ASC, created_at ASC 
       LIMIT 10
     `);
 
@@ -505,16 +505,17 @@ app.get('/api/v1/leaderboards', async (req, res) => {
       return `${maskedName}@${emailParts[1]}`;
     };
 
-    const formatList = (rows) => rows.map((row, index) => ({
+    const formatList = (rows, isReaction = false) => rows.map((row, index) => ({
       position: index + 1,
       email: maskEmail(row.email),
-      level: row.level || 1
+      // Si es reacción mostramos "ms", sino "Nivel"
+      displayValue: isReaction ? `${row.level} ms` : `Nivel ${row.level}`
     }));
 
     res.json({
       success: true,
       arcade: formatList(arcadeRes.rows),
-      reaction: formatList(reactionRes.rows),
+      reaction: formatList(reactionRes.rows, true),
       attention: formatList(attentionRes.rows)
     });
 
