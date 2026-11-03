@@ -50,52 +50,42 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// 🔄 LÓGICA DE RESETEO SEMANAL AUTOMÁTICO (SOLUCIÓN A LA CAPTURA)
+// 🔄 LÓGICA DE RESETEO SEMANAL AUTOMÁTICO Y PREMIOS
 async function checkAndExecuteWeeklyReset() {
   const client = await pool.connect();
   try {
     const ahora = new Date();
-    // Obtener la semana del año basada en UTC (estándar de Monetag)
     const startOfYear = new Date(ahora.getUTCFullYear(), 0, 1);
     const numSemanaUtc = Math.ceil((((ahora - startOfYear) / 86400000) + startOfYear.getDay() + 1) / 7);
     
-    // Es lunes UTC? (getDay() === 1)
     if (ahora.getUTCDay() !== 1) return; 
 
-    // Consultar el estado del sistema para ver si ya se reseteó esta semana
     const res = await client.query('SELECT current_week FROM system_state LIMIT 1');
     const dbWeek = res.rows[0]?.current_week;
 
-    // Si la semana de la base de datos es distinta a la actual, ejecutamos el reset
     if (dbWeek !== numSemanaUtc) {
       console.log(`🔄 Nuevo ciclo semanal detectado (Semana ${numSemanaUtc}). Ejecutando reseteo general...`);
       
       await client.query('BEGIN');
       
-      // 🥇 🥈 🥉 OBTENER Y PREMIAR A LOS GANADORES DEL TOP 3
       const winnersRes = await client.query('SELECT id, points_balance, arcade_level FROM users ORDER BY arcade_level DESC LIMIT 3');
       
-      const winnerPoints = [100, 60, 40]; // Premios para 1er, 2do y 3er puesto
+      const winnerPoints = [100, 60, 40]; 
       for (let i = 0; i < winnersRes.rows.length; i++) {
         const winner = winnersRes.rows[i];
-        if (winner && (winner.arcade_level > 1)) { // Solo premiar si jugaron
+        if (winner && (winner.arcade_level > 1)) {
           const prizePoints = winnerPoints[i];
           await client.query('UPDATE users SET points_balance = points_balance + $1 WHERE id = $2', [prizePoints, winner.id]);
           console.log(`🏆 Premio de ${prizePoints} puntos acreditado al usuario ${winner.id} (Puesto ${i+1}).`);
         }
       }
 
-      // 🔄 RESETEAR NIVELES DE TODOS LOS USUARIOS A 1
       await client.query('UPDATE users SET arcade_level = 1');
-      console.log('✅ Niveles de arcade de todos los usuarios reseteados a 1.');
-
-      // ACTUALIZAR LA SEMANA ACTUAL EN EL ESTADO DEL SISTEMA
       await client.query('UPDATE system_state SET current_week = $1', [numSemanaUtc]);
       
       await client.query('COMMIT');
       console.log('🎉 Reseteo semanal completado exitosamente.');
     }
-
   } catch (err) {
     await client.query('ROLLBACK');
     console.error("❌ Error durante el reseteo semanal:", err);
@@ -109,7 +99,6 @@ async function initDb() {
   try {
     await client.query('BEGIN');
     
-    // CREAR TABLA DE USUARIOS
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id VARCHAR(36) PRIMARY KEY,
@@ -126,7 +115,6 @@ async function initDb() {
       );
     `);
 
-    // CREAR TABLA DE SESIONES DE ANUNCIOS
     await client.query(`
       CREATE TABLE IF NOT EXISTS ad_sessions (
         id VARCHAR(36) PRIMARY KEY,
@@ -137,7 +125,6 @@ async function initDb() {
       );
     `);
 
-    // CREAR TABLA DE RETIROS
     await client.query(`
       CREATE TABLE IF NOT EXISTS withdrawals (
         id VARCHAR(36) PRIMARY KEY,
@@ -152,7 +139,6 @@ async function initDb() {
       );
     `);
 
-    // CREAR TABLA DE ESTADO DEL SISTEMA (PARA CONTROL DEL RESET SEMANAL)
     await client.query(`
       CREATE TABLE IF NOT EXISTS system_state (
         id INT PRIMARY KEY,
@@ -161,14 +147,13 @@ async function initDb() {
       );
     `);
 
-    // Inicializar el estado del sistema con la semana 0 si no existe
     await client.query(`
       INSERT INTO system_state (id, current_week, last_reset_date)
       SELECT 1, 0, CURRENT_TIMESTAMP WHERE NOT EXISTS (SELECT 1 FROM system_state)
     `);
 
     await client.query('COMMIT');
-    console.log("✅ Base de datos inicializada correctamente con control semanal.");
+    console.log("✅ Base de datos inicializada correctamente.");
   } catch (err) {
     await client.query('ROLLBACK');
     console.error("❌ Error en inicialización de DB:", err);
@@ -177,7 +162,6 @@ async function initDb() {
   }
 }
 
-// Inicializar base de datos y comprobar el reseteo semanal al arrancar el servidor
 (async () => {
   await initDb();
   await checkAndExecuteWeeklyReset(); 
@@ -280,6 +264,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ message: 'Login exitoso.', token, user: formatUser(user) });
   } catch (error) {
+    console.error("❌ Error en login:", error);
     res.status(500).json({ error: 'Error en servidor.' });
   }
 });
@@ -387,7 +372,6 @@ app.post('/api/v1/auth/reset-password', async (req, res) => {
 
 app.get('/api/v1/user/profile', authenticateToken, async (req, res) => {
   try {
-    // Comprobar si corresponde un reseteo semanal al consultar el perfil
     await checkAndExecuteWeeklyReset(); 
     const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado.' });
@@ -439,7 +423,6 @@ app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
 
 app.get('/api/v1/leaderboard', async (req, res) => {
   try {
-    // Comprobar si corresponde un reseteo semanal al consultar el ranking
     await checkAndExecuteWeeklyReset(); 
 
     const result = await pool.query(`
