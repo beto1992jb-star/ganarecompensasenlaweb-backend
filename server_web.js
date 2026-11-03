@@ -80,7 +80,7 @@ async function checkAndExecuteWeeklyReset() {
         }
       }
 
-      await client.query('UPDATE users SET arcade_level = 1, reaction_level = 1, attention_level = 1');
+      await client.query('UPDATE users SET arcade_level = 1');
       await client.query('UPDATE system_state SET current_week = $1', [numSemanaUtc]);
       
       await client.query('COMMIT');
@@ -108,18 +108,12 @@ async function initDb() {
         referred_by VARCHAR(36),
         points_balance NUMERIC(10,2) DEFAULT 0.00,
         arcade_level INT DEFAULT 1,
-        reaction_level INT DEFAULT 1,
-        attention_level INT DEFAULT 1,
         reset_token VARCHAR(255),
         reset_token_expires BIGINT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(referred_by) REFERENCES users(id) ON DELETE SET NULL
       );
     `);
-
-    // Migraciones automáticas por si las columnas nuevas no existían
-    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS reaction_level INT DEFAULT 1;`);
-    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS attention_level INT DEFAULT 1;`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS ad_sessions (
@@ -159,7 +153,7 @@ async function initDb() {
     `);
 
     await client.query('COMMIT');
-    console.log("✅ Base de datos inicializada correctamente con los nuevos niveles de juegos.");
+    console.log("✅ Base de datos inicializada correctamente.");
   } catch (err) {
     await client.query('ROLLBACK');
     console.error("❌ Error en inicialización de DB:", err);
@@ -215,9 +209,7 @@ function formatUser(user) {
     email: user.email,
     points_balance: parseFloat(user.points_balance || 0),
     referral_code: user.referral_code,
-    arcade_level: parseInt(user.arcade_level || 1, 10),
-    reaction_level: parseInt(user.reaction_level || 1, 10),
-    attention_level: parseInt(user.attention_level || 1, 10)
+    arcade_level: parseInt(user.arcade_level || 1, 10)
   };
 }
 
@@ -241,8 +233,8 @@ app.post('/api/v1/auth/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const insertResult = await pool.query(
-      `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance, arcade_level, reaction_level, attention_level)
-       VALUES ($1, $2, $3, $4, $5, 0, 1, 1, 1) RETURNING *`,
+      `INSERT INTO users (id, email, password, referral_code, referred_by, points_balance, arcade_level)
+       VALUES ($1, $2, $3, $4, $5, 0, 1) RETURNING *`,
       [userId, cleanEmail, hashedPassword, myReferralCode, referredByUserId]
     );
 
@@ -408,63 +400,56 @@ app.post('/api/v1/ad/start', authenticateToken, async (req, res) => {
   }
 });
 
-// Rutas de sincronización de niveles para los 3 minijuegos
 app.post('/api/v1/user/arcade-level', authenticateToken, async (req, res) => {
   try {
-    const newLevel = parseInt(req.body.level, 10);
-    if (isNaN(newLevel) || newLevel < 1) return res.status(400).json({ error: 'Nivel inválido.' });
-    await pool.query('UPDATE users SET arcade_level = GREATEST(COALESCE(arcade_level, 1), $1) WHERE id = $2', [newLevel, req.user.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: 'Error en servidor.' }); }
+    const { level } = req.body;
+    const newLevel = parseInt(level, 10);
+
+    if (isNaN(newLevel) || newLevel < 1) {
+      return res.status(400).json({ error: 'Nivel inválido.' });
+    }
+
+    await pool.query(
+      'UPDATE users SET arcade_level = GREATEST(COALESCE(arcade_level, 1), $1) WHERE id = $2',
+      [newLevel, req.user.id]
+    );
+
+    res.json({ success: true, message: 'Nivel de arcade sincronizado.' });
+  } catch (err) {
+    console.error("❌ Error actualizando nivel arcade:", err);
+    res.status(500).json({ error: 'Error en servidor.' });
+  }
 });
 
-app.post('/api/v1/user/reaction-level', authenticateToken, async (req, res) => {
-  try {
-    const newLevel = parseInt(req.body.level, 10);
-    if (isNaN(newLevel) || newLevel < 1) return res.status(400).json({ error: 'Nivel inválido.' });
-    await pool.query('UPDATE users SET reaction_level = GREATEST(COALESCE(reaction_level, 1), $1) WHERE id = $2', [newLevel, req.user.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: 'Error en servidor.' }); }
-});
-
-app.post('/api/v1/user/attention-level', authenticateToken, async (req, res) => {
-  try {
-    const newLevel = parseInt(req.body.level, 10);
-    if (isNaN(newLevel) || newLevel < 1) return res.status(400).json({ error: 'Nivel inválido.' });
-    await pool.query('UPDATE users SET attention_level = GREATEST(COALESCE(attention_level, 1), $1) WHERE id = $2', [newLevel, req.user.id]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: 'Error en servidor.' }); }
-});
-
-// Endpoint global para obtener los rankings Top 10 de cada minijuego
-app.get('/api/v1/leaderboards', async (req, res) => {
+app.get('/api/v1/leaderboard', async (req, res) => {
   try {
     await checkAndExecuteWeeklyReset(); 
 
-    const formatRows = (rows, field) => rows.map((r, idx) => {
-      const emailParts = r.email.split('@');
+    const result = await pool.query(`
+      SELECT email, arcade_level 
+      FROM users 
+      WHERE arcade_level > 1
+      ORDER BY arcade_level DESC, created_at ASC 
+      LIMIT 10
+    `);
+
+    const leaderboard = result.rows.map((row, index) => {
+      const emailParts = row.email.split('@');
       const name = emailParts[0];
       const maskedName = name.length > 3 ? name.substring(0, 4) + '****' : name + '***';
+      const maskedEmail = `${maskedName}@${emailParts[1]}`;
+
       return {
-        position: idx + 1,
-        email: `${maskedName}@${emailParts[1]}`,
-        level: r[field] || 1
+        position: index + 1,
+        email: maskedEmail,
+        level: row.arcade_level || 1
       };
     });
 
-    const arcadeRes = await pool.query('SELECT email, arcade_level FROM users WHERE arcade_level > 1 ORDER BY arcade_level DESC, created_at ASC LIMIT 10');
-    const reactionRes = await pool.query('SELECT email, reaction_level FROM users WHERE reaction_level > 1 ORDER BY reaction_level DESC, created_at ASC LIMIT 10');
-    const attentionRes = await pool.query('SELECT email, attention_level FROM users WHERE attention_level > 1 ORDER BY attention_level DESC, created_at ASC LIMIT 10');
-
-    res.json({
-      success: true,
-      arcade: formatRows(arcadeRes.rows, 'arcade_level'),
-      reaction: formatRows(reactionRes.rows, 'reaction_level'),
-      attention: formatRows(attentionRes.rows, 'attention_level')
-    });
+    res.json({ success: true, leaderboard });
   } catch (err) {
-    console.error("❌ Error obteniendo leaderboards:", err);
-    res.status(500).json({ success: false, error: 'Error al obtener rankings.' });
+    console.error("❌ Error obteniendo leaderboard:", err);
+    res.status(500).json({ success: false, error: 'Error al obtener ranking.' });
   }
 });
 
