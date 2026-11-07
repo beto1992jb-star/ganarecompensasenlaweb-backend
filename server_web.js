@@ -475,16 +475,16 @@ app.get('/api/v1/leaderboards', async (req, res) => {
     const arcadeRes = await pool.query(`
       SELECT email, arcade_level AS level 
       FROM users 
-      WHERE arcade_level > 1
+      WHERE arcade_level > 0
       ORDER BY arcade_level DESC, created_at ASC 
       LIMIT 10
     `);
 
-    // 2. Leaderboard Reacción Rápida (Ordenado por menor tiempo en ms)
+    // 2. Leaderboard Reacción Rápida (Menor tiempo en ms es mejor)
     const reactionRes = await pool.query(`
       SELECT email, reaction_level AS level 
       FROM users 
-      WHERE reaction_level >= 150 AND reaction_level < 9999
+      WHERE reaction_level IS NOT NULL AND reaction_level < 9999
       ORDER BY reaction_level ASC, created_at ASC 
       LIMIT 10
     `);
@@ -493,7 +493,7 @@ app.get('/api/v1/leaderboards', async (req, res) => {
     const attentionRes = await pool.query(`
       SELECT email, attention_level AS level 
       FROM users 
-      WHERE attention_level > 1
+      WHERE attention_level > 0
       ORDER BY attention_level DESC, created_at ASC 
       LIMIT 10
     `);
@@ -508,7 +508,6 @@ app.get('/api/v1/leaderboards', async (req, res) => {
     const formatList = (rows, isReaction = false) => rows.map((row, index) => ({
       position: index + 1,
       email: maskEmail(row.email),
-      // Si es reacción mostramos "ms", sino "Nivel"
       displayValue: isReaction ? `${row.level} ms` : `Nivel ${row.level}`
     }));
 
