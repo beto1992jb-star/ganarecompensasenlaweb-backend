@@ -95,8 +95,9 @@ async function checkAndExecuteWeeklyReset() {
 }
 
 async function initDb() {
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
     
     await client.query(`
@@ -108,7 +109,7 @@ async function initDb() {
         referred_by VARCHAR(36),
         points_balance NUMERIC(10,2) DEFAULT 0.00,
         arcade_level INT DEFAULT 1,
-		reaction_level INT DEFAULT 1,
+        reaction_level INT DEFAULT 1,
         attention_level INT DEFAULT 1,
         reset_token VARCHAR(255),
         reset_token_expires BIGINT,
@@ -157,10 +158,12 @@ async function initDb() {
     await client.query('COMMIT');
     console.log("✅ Base de datos inicializada correctamente.");
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error("❌ Error en inicialización de DB:", err);
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch(e) {}
+    }
+    console.error("❌ Error en inicialización de DB:", err.message);
   } finally {
-    client.release();
+    if (client) client.release();
   }
 }
 
