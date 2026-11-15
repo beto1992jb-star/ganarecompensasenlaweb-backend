@@ -48,7 +48,11 @@ app.get('/', (req, res) => {
 });
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  user: 'postgres.bqvbffadaadjxboqadir',
+  password: '4270.1992.jb',
+  host: 'aws-1-us-west-2.pooler.supabase.com',
+  port: 5432,
+  database: 'postgres',
   ssl: { rejectUnauthorized: false }
 });
 
