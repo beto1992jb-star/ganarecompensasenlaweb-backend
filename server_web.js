@@ -46,8 +46,8 @@ app.get('/', (req, res) => {
 });
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/ganarecompensas',
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
 // 🔄 LÓGICA DE RESETEO SEMANAL AUTOMÁTICO Y PREMIOS
@@ -738,4 +738,3 @@ app.patch('/api/v1/admin/withdrawals/:id', authenticateAdmin, async (req, res) =
 app.listen(PORT, () => {
   console.log(`🚀 Servidor activo en el puerto ${PORT}`);
 });
-// Test deploy
